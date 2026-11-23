@@ -1,6 +1,6 @@
 import { addDays, buildPositions, effectivePlan, latestFx, outOfPlanStats, snapshot } from "../calc.js";
-import { todayStr } from "../format.js";
-import { allowedPlanAmendments, decimalInput, field, h, missingPlan, seg, setFieldError } from "../ui.js";
+import { fmtMoney, todayStr } from "../format.js";
+import { allowedPlanAmendments, confirmDialog, decimalInput, field, h, missingPlan, seg, setFieldError } from "../ui.js";
 import { finalizeClose } from "./plan.js";
 import { renderPause } from "./pause.js";
 
@@ -51,7 +51,7 @@ export async function render(root, ctx) {
     type: "text", inputmode: "decimal", value: latestFx(fxRows, today), required: true,
   });
   const dateField = field("成交日期", date);
-  const quantityField = field("數量（股）", quantity, hk ? null : "通常為 100 的倍數");
+  const quantityField = field("數量（股）", quantity, hk ? "整數股" : "整數股；買入通常為 100 的倍數");
   const priceField = field(`價格（${currency}）`, price);
   const feeField = field(`費用（${currency}）`, fee);
   const fxField = hk && field("匯率（1 港幣 = ? 人民幣）", fx);
@@ -88,13 +88,18 @@ export async function render(root, ctx) {
   root.append(h("form", { class: "form-stack", onsubmit: (event) => event.preventDefault() }, controls, errorText));
 
   function readValues() {
-    const qty = decimalInput(quantity.value.trim());
+    const quantityText = quantity.value.trim();
+    const qty = decimalInput(quantityText);
     const unitPrice = decimalInput(price.value.trim());
     const commission = decimalInput(fee.value.trim());
     const fxRate = hk ? decimalInput(fx.value.trim()) : 1;
     const dateError = !date.value || !date.validity.valid ? "請輸入今天或之前的日期" : "";
-    let quantityError = qty == null || qty <= 0 ? "數量須大於 0" : "";
-    if (!quantityError && qty !== Number(qty.toFixed(4))) quantityError = "數量最多可輸入四位小數";
+    let quantityError = "";
+    if (qty != null && /\.\d*[1-9]/.test(quantityText)) {
+      quantityError = "股數必須是整數。是不是把數量和價格填反了？";
+    } else if (qty == null || qty <= 0) {
+      quantityError = "數量須大於 0";
+    }
     const priceError = unitPrice == null || unitPrice <= 0 ? "價格須大於 0" : "";
     const feeError = commission == null || commission < 0 ? "費用須為 0 或以上" : "";
     const fxError = fxRate == null || fxRate <= 0 ? "匯率須大於 0" : "";
@@ -108,6 +113,19 @@ export async function render(root, ctx) {
       plan_id: plan.id, side, trade_date: date.value, quantity: qty, price: unitPrice,
       fee: commission, currency, fx_to_cny: fxRate,
     };
+  }
+
+  function needsLotConfirmation(trade) {
+    return !hk && trade.side === "buy" && trade.quantity % 100 !== 0;
+  }
+
+  function confirmTrade(trade) {
+    const action = trade.side === "buy" ? "買入" : "賣出";
+    const amount = fmtMoney(trade.quantity * trade.price);
+    const summary = `${action} ${plan.name} ${trade.quantity} 股 · 每股 ${trade.price} ${currency} · 金額 ${amount} ${currency}`;
+    if (!needsLotConfirmation(trade)) return confirmDialog(summary);
+    const reminder = `A 股買入通常以 100 股為單位。確定是 ${trade.quantity} 股嗎？`;
+    return confirmDialog(h("span", null, reminder, h("br"), summary));
   }
 
   async function submit(inPlan) {
@@ -129,6 +147,8 @@ export async function render(root, ctx) {
         setFieldError(quantityField, quantity, saleError);
         return;
       }
+      const confirmBeforePause = needsLotConfirmation(trade);
+      if (confirmBeforePause && !await confirmTrade(trade)) return;
       const [amendments, allTrades] = await Promise.all([db.listAmendments(plan.id), db.listTrades()]);
       const recentStart = addDays(today, -89);
       const previous = allTrades.filter((row) =>
@@ -143,8 +163,13 @@ export async function render(root, ctx) {
       renderPause(root, ctx, {
         plan: effective, trade, quote: prices.get(plan.symbol), current,
         stats: outOfPlanStats(previous, prices, today),
-        onConfirm: (reason) => saveTrade(trade, false, reason),
+        onConfirm: async (reason) => {
+          if (await saveTrade(trade, false, reason, confirmBeforePause) === false) {
+            pauseControls.disabled = false;
+          }
+        },
       });
+      const pauseControls = root.querySelector("form fieldset");
     } catch (error) {
       errorText.textContent = error.message;
     } finally {
@@ -152,11 +177,13 @@ export async function render(root, ctx) {
     }
   }
 
-  async function saveTrade(trade, inPlan, reason) {
+  async function saveTrade(trade, inPlan, reason, confirmed = false) {
     if (writing) return;
     writing = true;
     let written = false;
     try {
+      if (!confirmed && !await confirmTrade(trade)) return false;
+      if (!root.isConnected) return;
       if (trade.side === "sell") {
         const saleError = checkSale(trade, await db.listTrades(plan.id));
         if (saleError) {
@@ -165,6 +192,7 @@ export async function render(root, ctx) {
           return;
         }
       }
+      if (!root.isConnected) return;
       await db.addTrade({ ...trade, in_plan: inPlan, reason });
       written = true;
       toast("已記錄");
