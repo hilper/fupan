@@ -10,7 +10,7 @@ const settingsDefaults = {
 
 const settingsColumns = Object.keys(settingsDefaults).join(",");
 const alertColumns = "*,plans(name,symbol,market,stop_price)";
-const counterViewColumns = "status,error,result";
+const counterViewColumns = "status,error,result,done_at";
 const exitReviewEditableColumns = [
   "thesis_verdict", "pnl_sources", "next_time", "is_repeat", "decision_quality", "error_tags",
   "return_pct", "bench_return_pct", "excess_pct",

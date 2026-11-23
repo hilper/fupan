@@ -1,8 +1,9 @@
 import { addDays, buildPositions, effectivePlan, tradeReturn } from "../calc.js";
 import { fmtDate, fmtMoney, fmtPct, todayStr } from "../format.js";
 import {
-  allowedPlanAmendments, amendablePlanFields, confidenceField, counterViewResult, detailsValue,
-  displayPlanValue, field, h, isPlanValueBlank, missingPlan, missingSupplementFields, planFields,
+  adoptedCounterView, allowedPlanAmendments, amendablePlanFields, confidenceField, counterAdopted,
+  counterViewResult, detailsValue, displayPlanValue, field, h, isPlanValueBlank, missingPlan,
+  missingSupplementFields, planFields,
   planInput, planSections, pnlColor, readPlanInput, setFieldError,
 } from "../ui.js";
 import { actionableAlerts, alertCard } from "./alert.js";
@@ -130,7 +131,7 @@ function supplementForm(root, ctx, planId, missing) {
   );
 }
 
-function counterPanel(root, ctx, plan, latest, prefillCounterView) {
+function counterPanel(root, ctx, plan, latest, amendments = [], prefillCounterView) {
   const active = plan.status === "active";
   const panel = h("div", { class: "counter-panel" });
   const statusText = h("p", { class: "form-status", role: "status" });
@@ -155,6 +156,7 @@ function counterPanel(root, ctx, plan, latest, prefillCounterView) {
 
   function show() {
     const { status, error, result } = request ?? {};
+    const { adopted, at } = counterAdopted({ request, plan, amendments });
     const waiting = status === "queued" || status === "running";
     const refresh = (waiting || loadError) && action("重新整理", async () => {
       request = await ctx.db.latestCounterView(plan.id);
@@ -162,11 +164,8 @@ function counterPanel(root, ctx, plan, latest, prefillCounterView) {
       show();
     });
     const ask = (status === "error" || (!status && !loadError && active)) &&
-      action(status === "error" ? "重新請 AI 寫" : "請 AI 寫最強的看空理由", async () => {
-        request = await ctx.db.requestCounterView(plan.id);
-        show();
-      });
-    const adopt = active && status === "done" && result?.counter_view && (
+      action(status === "error" ? "重新請 AI 寫" : "請 AI 寫最強的看空理由", askAgain);
+    const adopt = active && !adopted && status === "done" && result?.counter_view && (
       isPlanValueBlank(plan.counter_view)
         ? action("補填到第 9 欄", () => saveSupplement(root, ctx, plan.id, { counter_view: result.counter_view }))
         : h("button", { class: "btn", type: "button", onclick: () => prefillCounterView(result.counter_view) },
@@ -174,13 +173,22 @@ function counterPanel(root, ctx, plan, latest, prefillCounterView) {
     );
     statusText.textContent = waiting ? "AI 反方觀點處理中" : "";
     errorText.textContent = loadError || (status === "error" ? error || "反方觀點處理失敗" : "");
+    const view = status === "done" && result?.counter_view && (
+      adopted ? adoptedCounterView(result, { at, retry: active && action("重新請 AI 寫", askAgain) })
+        : counterViewResult(result, adopt)
+    );
     const children = [
       statusText,
       (refresh || ask) && h("div", { class: "counter-actions" }, refresh, ask),
-      status === "done" && result?.counter_view && counterViewResult(result, adopt),
+      view,
       errorText,
     ];
     panel.replaceChildren(...children.filter(Boolean));
+  }
+
+  async function askAgain() {
+    request = await ctx.db.requestCounterView(plan.id);
+    show();
   }
 
   show();
@@ -423,7 +431,7 @@ export async function render(root, ctx) {
     planContent(plan, amendments, {
       missing,
       supplement: missing.length > 0 && supplementForm(root, ctx, original.id, missing),
-      counter: counterPanel(root, ctx, { ...original, status }, latestCounter, amendment?.prefillCounterView),
+      counter: counterPanel(root, ctx, { ...original, status }, latestCounter, amendments, amendment?.prefillCounterView),
     }),
     h("section", { class: "card" },
       h("h2", null, "修訂紀錄"),

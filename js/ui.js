@@ -255,6 +255,61 @@ export function confidenceField(value, label = planFields.confidence.label) {
   return { input, wrapper, get selected() { return choose.hidden; } };
 }
 
+function counterTime(value) {
+  const fraction = (value?.match(/\.(\d+)/)?.[1] ?? "").padEnd(6, "0");
+  const millis = Date.parse(value?.replace(/\.\d+/, "." + fraction.slice(0, 3)));
+  // Postgres 保留到微秒，Date.parse 只保留到毫秒。
+  return Number.isFinite(millis) ? millis * 1000 + Number(fraction.slice(3, 6)) : -Infinity;
+}
+
+export function counterAdopted({ request, plan, amendments = [] }) {
+  const view = request?.result?.counter_view;
+  if (request?.status !== "done" || !view) return { adopted: false, at: null };
+
+  let latest;
+  let latestTime = -Infinity;
+  for (const row of amendments) {
+    if (row.field !== "counter_view") continue;
+    const time = counterTime(row.created_at);
+    if (!latest || time > latestTime ||
+        (time === latestTime && Number(row.id ?? 0) > Number(latest.id ?? 0))) {
+      latest = row;
+      latestTime = time;
+    }
+  }
+
+  const current = latest ? latest.new_value : plan.counter_view;
+  if ((current ?? "").replace(/\s/g, "") === view.replace(/\s/g, "")) {
+    return { adopted: true, at: (latest ? latest.created_at : request.done_at) ?? null };
+  }
+  if (request.done_at && latestTime > counterTime(request.done_at)) {
+    return { adopted: true, at: latest.created_at };
+  }
+  return { adopted: false, at: null };
+}
+
+export function adoptedCounterView(result, { at, retry } = {}) {
+  const date = fmtDate(at);
+  const content = counterViewResult(result);
+  content.hidden = true;
+  const toggle = h("button", {
+    type: "button", class: "btn text-btn counter-original", "aria-expanded": false,
+    onclick: () => {
+      content.hidden = !content.hidden;
+      toggle.setAttribute("aria-expanded", !content.hidden);
+      toggle.textContent = content.hidden ? "看 AI 原文" : "收起 AI 原文";
+    },
+  }, "看 AI 原文");
+  return h("div", { class: "counter-adopted" },
+    h("div", { class: "counter-adopted-row" },
+      h("span", { class: "lbl" }, date === "—" ? "已採用 AI 看空理由"
+        : `已採用 AI 看空理由（${date.slice(5).replace("-", "/")}）`),
+      toggle, retry,
+    ),
+    content,
+  );
+}
+
 export function counterViewResult(result, action) {
   return h("div", { class: "counter-result" },
     h("strong", null, "AI 的看空理由"),

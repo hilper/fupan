@@ -479,7 +479,7 @@ dialog::backdrop {
   font-size: 13px;
 }
 
-.counter-panel, .counter-result:not([hidden]) {
+.counter-panel, .counter-adopted, .counter-result:not([hidden]) {
   display: grid;
   gap: 8px;
 }
@@ -494,6 +494,28 @@ dialog::backdrop {
 .counter-refresh {
   padding-inline: 8px;
   font-size: 12px;
+}
+
+.counter-adopted-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+.counter-adopted-row .btn {
+  padding-inline: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.counter-adopted-row .counter-original {
+  padding-inline: 0;
+  text-decoration: underline;
+}
+
+.counter-adopted-row .counter-original + .btn {
+  margin-inline-start: auto;
 }
 
 .counter-result {
