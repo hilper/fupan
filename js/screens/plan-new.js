@@ -1,10 +1,12 @@
-import { addDays, planLossEstimate, symbolInfo } from "../calc.js";
+import { addDays, planChecks, planLossEstimate, symbolInfo } from "../calc.js";
 import { fmtPct, todayStr } from "../format.js";
 import {
   adoptedCounterView, confidenceField, confirmDialog, counterAdopted, counterViewResult,
-  field, h, isPlanValueBlank, missingPlan,
-  planFields, planInput, planSections, readPlanInput, seg, setFieldError, supplementPlanFields,
+  field, h, isPlanValueBlank, missingPlan, planChecksCard,
+  planCheckPanel, planFields, planInput, planSections, planTimestamp, readPlanInput, seg,
+  setFieldError, supplementPlanFields,
 } from "../ui.js";
+import { loadPortfolio } from "./holdings.js";
 
 const roles = ["核心", "成長", "周期", "交易", "觀察"].map((role) => ({ value: role, label: role }));
 const timeFormat = new Intl.DateTimeFormat("zh-TW", {
@@ -15,14 +17,15 @@ export async function render(root, ctx) {
   const { db, navigate, params, toast } = ctx;
   const [draft, settings] = await Promise.all([
     params[0] ? db.getPlan(params[0]) : null,
-    db.getSettings(),
+    db.getSettings().catch(() => null),
   ]);
   if (!root.isConnected) return;
   if (params[0] && !draft) return missingPlan(root);
   if (draft && draft.status !== "draft") return navigate(`#plan/${draft.id}`, { replace: true });
 
   let id = draft?.id;
-  const defaultReview = addDays(todayStr(), 30);
+  const today = todayStr();
+  const defaultReview = addDays(today, 30);
   const values = {
     ...draft,
     role: draft?.role ?? "觀察",
@@ -30,6 +33,7 @@ export async function render(root, ctx) {
   };
   const pending = new Map();
   const invalid = new Set();
+  const editors = new Map();
   let timer;
   let saving;
   let locking = false;
@@ -41,6 +45,12 @@ export async function render(root, ctx) {
   let counterError = "";
   let shownCounterResult;
   let shownCounterAdopted = false;
+  let rulePrice = null;
+  let priceSymbol;
+  let priceRequest = 0;
+  let portfolio = null;
+  let checkHistory = null;
+  let lastSavedAt;
 
   const completion = h("strong", { "aria-live": "polite" });
   const saveStatus = h("p", { class: "form-status", role: "status" });
@@ -50,6 +60,7 @@ export async function render(root, ctx) {
   const market = h("p", { class: "lbl", "aria-live": "polite" });
   const ratio = h("p", { class: "plan-calculation" });
   const loss = h("p", { class: "plan-calculation" });
+  const ruleCard = h("div");
   const missing = h("p", { class: "lbl" });
   const lock = h("button", { class: "btn pri", type: "submit" }, "鎖定計劃卡");
   const askCounter = h("button", {
@@ -63,6 +74,23 @@ export async function render(root, ctx) {
   const counterPanel = h("div", { class: "counter-panel" },
     h("div", { class: "counter-actions" }, askCounter, refreshCounter), counterStatus, counterResult,
   );
+  const planCheck = planCheckPanel({
+    draft: true,
+    load: () => db.latestPlanCheck(id),
+    send: async () => {
+      if (!await flush()) throw new Error(saveError.textContent);
+      return db.requestPlanCheck(id);
+    },
+    canSend: () => Boolean(id && !locking && filled("thesis")),
+    changedAfter: (doneAt) => planTimestamp(lastSavedAt) > planTimestamp(doneAt),
+    onFix(key) {
+      const input = editors.get(key);
+      const optional = input.closest(".plan-optional");
+      if (optional) optional.open = true;
+      input.scrollIntoView({ block: "center" });
+      input.focus({ preventScroll: true });
+    },
+  });
 
   function waitingForCounter() {
     return ["queued", "running"].includes(counterRequest?.status);
@@ -226,6 +254,7 @@ export async function render(root, ctx) {
     const definition = planFields[key];
     const confidence = key === "confidence" ? confidenceField(values[key]) : null;
     const input = confidence?.input ?? planInput(definition, values[key]);
+    editors.set(key, input);
     if (key === "counter_view") counterInput = input;
     const wrapper = confidence?.wrapper ?? field(definition.label, input, definition.optional ? "可留空" : null);
 
@@ -284,6 +313,8 @@ export async function render(root, ctx) {
     step(4, ["planned_weight_pct"], loss),
     h("section", { class: "card" }, editor("next_review_date"),
       h("label", { class: "check-label" }, dateSeen, "我已確認下次複查日")),
+    h("section", { class: "card" }, planCheck.panel),
+    ruleCard,
     h("div", { class: "card" }, lock, missing, lockError),
     h("details", { class: "plan-optional" }, optionalSummary, h("div", { class: "stack" },
       planSections.map(([, keys], index) => {
@@ -298,7 +329,20 @@ export async function render(root, ctx) {
     saveStatus, saveError, retry,
   ), h("form", { onsubmit: lockDraft, novalidate: true }, formContent));
   refresh();
-  if (id) void loadCounterView();
+  if (id) {
+    void loadCounterView();
+    void planCheck.refresh();
+  }
+  if (settings?.start_date) {
+    void loadPortfolio(db, today).then((data) => {
+      portfolio = data.portfolio;
+      updateChecks();
+    }, () => {});
+  }
+  void db.getPlanCheckHistory().then((data) => {
+    checkHistory = data;
+    updateChecks();
+  }, () => {});
 
   function identityComplete() {
     return ["symbol", "name", "sector"].every((key) => values[key] && !invalid.has(key));
@@ -306,6 +350,31 @@ export async function render(root, ctx) {
 
   function filled(key) {
     return !isPlanValueBlank(values[key]) && !invalid.has(key);
+  }
+
+  async function loadRulePrice() {
+    const symbol = symbolInfo(values.symbol)?.symbol;
+    if (symbol === priceSymbol) return;
+    priceSymbol = symbol;
+    const request = ++priceRequest;
+    rulePrice = null;
+    if (!symbol) return;
+
+    const prices = await db.latestPrices([symbol]).catch(() => null);
+    if (request !== priceRequest) return;
+    rulePrice = Number(prices?.get(symbol)?.close) || null;
+    updateChecks();
+  }
+
+  function updateChecks() {
+    if (!root.isConnected) return;
+    const checks = planChecks({
+      plan: { ...values, id }, settings, price: rulePrice, portfolio, history: checkHistory,
+    });
+    const card = planChecksCard(checks);
+    const details = card.querySelector("details");
+    if (details && ruleCard.querySelector("details")?.open) details.open = true;
+    ruleCard.replaceChildren(card);
   }
 
   function refresh() {
@@ -328,17 +397,21 @@ export async function render(root, ctx) {
     lock.disabled = locking || Boolean(remaining.length);
     formContent.disabled = locking;
     updateCounterButtons();
+    planCheck.update();
 
     const gain = values.expected_up_pct;
     const downside = values.expected_down_pct;
     ratio.textContent = filled("expected_up_pct") && filled("expected_down_pct")
       ? `賺賠比 ${downside ? (gain / downside).toFixed(1) + " : 1" : "—"}` : "賺賠比 —";
-    const estimate = filled("planned_weight_pct") && filled("expected_down_pct") && planLossEstimate(values, settings);
+    const estimate = filled("planned_weight_pct") && filled("expected_down_pct") && planLossEstimate(values, settings ?? {});
     loss.textContent = estimate
       ? `觸發止損時組合虧損 ${fmtPct(estimate.pct)}${estimate.over ? ` · 超過單筆虧損上限 ${fmtPct(settings.loss_budget_pct)}` : ""}`
       : "";
     loss.hidden = !estimate;
     loss.classList.toggle("warn", Boolean(estimate?.over));
+
+    void loadRulePrice();
+    updateChecks();
   }
 
   function flush() {
@@ -359,7 +432,8 @@ export async function render(root, ctx) {
       pending.clear();
       try {
         if (id) {
-          await db.saveDraft(id, Object.fromEntries(batch));
+          const saved = await db.saveDraft(id, Object.fromEntries(batch));
+          lastSavedAt = saved?.updated_at ?? new Date().toISOString();
         } else {
           const created = await db.createDraft({
             next_review_date: defaultReview,
@@ -371,6 +445,7 @@ export async function render(root, ctx) {
           updateCounterButtons();
           if (root.isConnected) history.replaceState(history.state, "", `#plan-new/${id}`);
         }
+        planCheck.update();
       } catch (error) {
         for (const [key, value] of batch) {
           if (!pending.has(key) && !invalid.has(key) && !(key === "market" && invalid.has("symbol"))) {

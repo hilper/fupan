@@ -260,6 +260,164 @@ export function planLossEstimate(plan, settings) {
   return { pct: rounded(pct), over: pct > Number(settings.loss_budget_pct) };
 }
 
+const planCheckNumber = new Intl.NumberFormat("zh-TW", {
+  minimumFractionDigits: 1,
+  maximumFractionDigits: 1,
+});
+
+function checkValue(value) {
+  if (!hasValue(value)) return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function exceeds(value, limit, scale = 1) {
+  // 避免運算誤差把剛好等於門檻的數值判成超過。
+  return value - limit > Number.EPSILON * Math.max(scale, Math.abs(value), Math.abs(limit)) * 4;
+}
+
+export function planChecks({ plan, settings, price, portfolio, history }) {
+  const number = (value) => planCheckNumber.format(value);
+  const pct = (value) => `${number(value)}%`;
+  const checks = [];
+  const add = (key, status, text) => checks.push({ key, status, text });
+  const up = checkValue(plan.expected_up_pct);
+  const down = checkValue(plan.expected_down_pct);
+  const stop = checkValue(plan.stop_price);
+  const confidence = checkValue(plan.confidence);
+  const weight = checkValue(plan.planned_weight_pct);
+  const maxWeight = checkValue(plan.max_weight_pct);
+  const distance = stop != null && price > 0 ? (price - stop) / price * 100 : null;
+  const rewardRisk = checkValue(settings?.min_reward_risk);
+  const stopMin = checkValue(settings?.stop_min_pct);
+  const stopMax = checkValue(settings?.stop_max_pct);
+  const singleLimit = checkValue(settings?.single_max_pct);
+  const lossBudget = checkValue(settings?.loss_budget_pct);
+  const sectorLimit = checkValue(settings?.sector_max_pct);
+  const settingsMissing = "缺少設定中的規則門檻";
+
+  if (up == null || down == null) {
+    add("reward_risk", "skip", "填了預期上漲與下跌才能算賺賠比");
+  } else if (down <= 0) {
+    add("reward_risk", "skip", "預期下跌須大於 0 才能算賺賠比");
+  } else if (rewardRisk == null) {
+    add("reward_risk", "skip", settingsMissing);
+  } else {
+    const ratio = up / down;
+    const over = exceeds(rewardRisk, ratio);
+    add("reward_risk", over ? "warn" : "ok",
+      `賺賠比 ${number(ratio)} : 1${over ? `，低於 ${number(rewardRisk)} : 1` : ""}`);
+  }
+
+  if (stop == null) {
+    add("stop_distance", "skip", "填了止損價才能算");
+  } else if (distance == null) {
+    add("stop_distance", "skip", "還沒有這支股票的行情，收盤後由 Mac 抓取");
+  } else if (stop >= price) {
+    add("stop_distance", "warn", "止損價不低於現價");
+  } else if (stopMin == null || stopMax == null) {
+    add("stop_distance", "skip", settingsMissing);
+  } else {
+    const message = `止損距現價 ${pct(distance)}`;
+    if (exceeds(stopMin, distance, 100)) {
+      add("stop_distance", "warn", `${message}，比 ${pct(stopMin)} 還近，容易被正常波動洗出場`);
+    } else if (exceeds(distance, stopMax, 100)) {
+      add("stop_distance", "warn", `${message}，超過 ${pct(stopMax)}，一次虧損偏大`);
+    } else {
+      add("stop_distance", "ok", message);
+    }
+  }
+
+  if (confidence == null || up == null || down == null) {
+    add("expected_value", "skip", "填了信心、預期上漲與下跌才能算期望值");
+  } else {
+    const gain = confidence * up;
+    const loss = (100 - confidence) * down;
+    const ev = exceeds(gain, loss) || exceeds(loss, gain) ? (gain - loss) / 100 : 0;
+    const signed = (ev > 0 ? "+" : ev < 0 ? "−" : "") + pct(Math.abs(ev));
+    add("expected_value", ev <= 0 ? "warn" : "ok",
+      `以信心 ${Math.round(confidence)}% 當勝率，期望值 ${signed}${ev <= 0 ? "，不划算" : ""}`);
+  }
+
+  const group = confidence == null ? null : confidence < 60 ? "low" : confidence < 80 ? "mid" : "high";
+  const confidenceLimit = group === "low" ? checkValue(settings?.low_conf_max_weight_pct)
+    : group === "mid" ? checkValue(settings?.mid_conf_max_weight_pct) : singleLimit;
+  if (confidence == null || weight == null) {
+    add("confidence_weight", "skip", "填了信心與計劃倉位才能檢查");
+  } else if (confidenceLimit == null) {
+    add("confidence_weight", "skip", settingsMissing);
+  } else if (exceeds(weight, confidenceLimit)) {
+    add("confidence_weight", "warn", `信心 ${Math.round(confidence)} 但計劃倉位 ${pct(weight)}，建議不超過 ${pct(confidenceLimit)}`);
+  } else {
+    add("confidence_weight", "ok", `信心 ${Math.round(confidence)}，計劃倉位 ${pct(weight)} 在 ${pct(confidenceLimit)} 以內`);
+  }
+
+  if (weight == null) {
+    add("single_limit", "skip", "填了計劃倉位才能檢查單票上限");
+  } else if (singleLimit == null) {
+    add("single_limit", "skip", settingsMissing);
+  } else if (exceeds(weight, singleLimit)) {
+    add("single_limit", "warn", `計劃倉位 ${pct(weight)} 超過單票上限 ${pct(singleLimit)}`);
+  } else if (maxWeight != null && exceeds(maxWeight, singleLimit)) {
+    add("single_limit", "warn", `最高倉位 ${pct(maxWeight)} 超過單票上限 ${pct(singleLimit)}`);
+  } else {
+    add("single_limit", "ok", `倉位在單票上限 ${pct(singleLimit)} 以內`);
+  }
+
+  const useStopDistance = distance > 0;
+  const downside = useStopDistance ? distance : down;
+  if (distance != null && distance <= 0 && down == null) {
+    add("stop_loss_budget", "skip", "止損價不低於現價，無法估算止損虧損");
+  } else if (weight == null || downside == null) {
+    add("stop_loss_budget", "skip", "填了計劃倉位，並有行情與止損價或預期下跌，才能算止損虧損");
+  } else if (lossBudget == null) {
+    add("stop_loss_budget", "skip", settingsMissing);
+  } else {
+    const loss = weight * downside / 100;
+    if (exceeds(loss, lossBudget, useStopDistance ? Math.abs(weight) : 1)) {
+      add("stop_loss_budget", "warn", `觸發止損會虧掉組合 ${pct(loss)}，超過上限 ${pct(lossBudget)}`);
+    } else {
+      add("stop_loss_budget", "ok", `觸發止損約虧組合 ${pct(loss)}`);
+    }
+  }
+
+  if (portfolio == null) {
+    add("sector_limit", "skip", "到設定填起始日與起始現金後才能算");
+  } else if (!hasValue(plan.sector) || weight == null) {
+    add("sector_limit", "skip", "填了行業與計劃倉位才能檢查行業上限");
+  } else if (sectorLimit == null) {
+    add("sector_limit", "skip", settingsMissing);
+  } else {
+    const weights = portfolio.positions
+      .filter((position) => position.plan.sector === plan.sector &&
+        (plan.id == null || position.plan.id !== plan.id))
+      .map((position) => checkValue(position.weight_pct));
+    if (weights.includes(null)) {
+      add("sector_limit", "skip", "缺少同行業持倉權重，無法計算行業合計");
+    } else {
+      const total = weights.reduce((sum, value) => sum + value, weight);
+      const message = `${plan.sector}行業合計 ${pct(total)}`;
+      if (exceeds(total, sectorLimit)) {
+        add("sector_limit", "warn", `加上這張，${message}，超過 ${pct(sectorLimit)}`);
+      } else {
+        add("sector_limit", "ok", message);
+      }
+    }
+  }
+
+  const record = history?.find(({ key }) => key === group);
+  if (!record || record.n < 5) {
+    add("calibration", "skip", "信心的歷史命中率還不夠 5 筆");
+  } else {
+    const below = group !== "low" && record.pct < (group === "high" ? 80 : 60);
+    const label = group === "high" ? record.label : `信心 ${record.label}`;
+    add("calibration", below ? "warn" : "ok",
+      `你過去${label} 的卡實際${below ? "只" : ""}對了 ${pct(record.pct)}（${record.n} 筆）`);
+  }
+
+  return checks;
+}
+
 const periodMonths = { month: 1, quarter: 3, year: 12 };
 
 export function shiftPeriod(kind, anchor, step) {

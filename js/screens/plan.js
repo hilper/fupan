@@ -1,10 +1,10 @@
-import { addDays, buildPositions, effectivePlan, tradeReturn } from "../calc.js";
+import { addDays, buildPositions, effectivePlan, planChecks, tradeReturn } from "../calc.js";
 import { fmtDate, fmtMoney, fmtPct, todayStr } from "../format.js";
 import {
   adoptedCounterView, allowedPlanAmendments, amendablePlanFields, confidenceField, counterAdopted,
   counterViewResult, detailsValue, displayPlanValue, field, h, isPlanValueBlank, missingPlan,
-  missingSupplementFields, planFields,
-  planInput, planSections, pnlColor, readPlanInput, setFieldError,
+  missingSupplementFields, planCheckPanel, planCheckResult, planChecksCard, planFields,
+  planInput, planSections, planTimestamp, pnlColor, readPlanInput, setFieldError,
 } from "../ui.js";
 import { actionableAlerts, alertCard } from "./alert.js";
 import { evidenceLogRow } from "./evidence.js";
@@ -48,7 +48,7 @@ export async function finalizeClose(db, plan, today) {
   return review;
 }
 
-function planContent(plan, amendments, { missing = [], supplement, counter } = {}) {
+function planContent(plan, amendments, { missing = [], supplement, counter, check } = {}) {
   const draft = plan.status === "draft";
   const sections = planSections.map(([title, keys], index) => {
     return h("section", { class: "plan-read-section" },
@@ -61,6 +61,7 @@ function planContent(plan, amendments, { missing = [], supplement, counter } = {
       index === 2 && plan.expected_up_pct != null && Number(plan.expected_down_pct) > 0 &&
         h("p", { class: "lbl" }, `賺賠比 ${(plan.expected_up_pct / plan.expected_down_pct).toFixed(1)} : 1`),
       index === 8 && counter,
+      index === 8 && check,
     );
   });
   return h("section", { class: "card" },
@@ -125,10 +126,20 @@ function supplementForm(root, ctx, planId, missing) {
     }
   }
 
-  return h("details", { class: "plan-supplement" },
+  const form = h("details", { class: "plan-supplement" },
     h("summary", { class: "btn" }, "補填空白項目"),
     h("form", { class: "form-stack", onsubmit: save, novalidate: true }, inputs, errorText),
   );
+  return {
+    form,
+    focus(key) {
+      const control = controls.find((item) => item.key === key);
+      if (!control) return;
+      form.open = true;
+      control.input.scrollIntoView({ block: "center" });
+      control.input.focus({ preventScroll: true });
+    },
+  };
 }
 
 function counterPanel(root, ctx, plan, latest, amendments = [], prefillCounterView) {
@@ -278,16 +289,23 @@ function amendmentForm(root, ctx, plan) {
   const form = h("form", { class: "flow-form form-stack", onsubmit: save, novalidate: true },
     formFields, errorText,
   );
+  function prefill(key, value, why) {
+    if (formFields.disabled) return;
+    select.value = key;
+    updateInput(value);
+    reason.value = why;
+    setFieldError(reasonField, reason);
+    errorText.textContent = "";
+    input.focus();
+  }
+
   return {
     form,
     prefillCounterView(value) {
-      if (formFields.disabled) return;
-      select.value = "counter_view";
-      updateInput(value);
-      reason.value = "採用 AI 反方觀點";
-      setFieldError(reasonField, reason);
-      errorText.textContent = "";
-      input.focus();
+      prefill("counter_view", value, "採用 AI 反方觀點");
+    },
+    prefillPlanCheck(key) {
+      prefill(key, plan[key], "依 AI 體檢改寫");
     },
   };
 }
@@ -411,18 +429,55 @@ export async function render(root, ctx) {
   const plan = effectivePlan({ ...original, status }, allowedPlanAmendments(amendments));
   let position;
   let quote;
-  if (held?.quantity > 0 && status === "active") {
-    const { portfolio, latestPrices } = await loadPortfolio(db, today);
-    position = portfolio.positions.find((item) => item.plan.id === original.id);
-    quote = latestPrices.get(original.symbol);
+  let checks;
+  if (status === "active") {
+    const holding = held?.quantity > 0;
+    const readSettings = () => db.getSettings().catch(() => null);
+    const readQuote = () => db.latestPrices([plan.symbol]).then((prices) => prices.get(plan.symbol), () => null);
+    const settingsRequest = holding ? null : readSettings();
+    const holdingsRequest = holding ? loadPortfolio(db, today)
+      : settingsRequest.then((settings) => settings?.start_date ? loadPortfolio(db, today) : null);
+    const [holdings, history, directQuote] = await Promise.all([
+      holdingsRequest.catch(() => null),
+      db.getPlanCheckHistory().catch(() => null),
+      holding ? null : readQuote(),
+    ]);
+    const settings = await (settingsRequest ?? holdings?.settings ?? readSettings());
+    position = holdings?.portfolio.positions.find((item) => item.plan.id === plan.id);
+    quote = holding ? (holdings ? holdings.latestPrices.get(plan.symbol) : await readQuote()) : directQuote;
+    checks = planChecks({
+      plan, settings, price: Number(quote?.close) || null,
+      portfolio: settings?.start_date ? holdings?.portfolio ?? null : null,
+      history,
+    });
   } else {
     quote = (await db.latestPrices([original.symbol])).get(original.symbol);
   }
 
   const statusLabel = { closed: "已清倉", active: held?.quantity > 0 ? "持有中" : "已鎖定未買入" };
+  const latestClosedCheck = status === "closed"
+    ? await db.latestPlanCheck(plan.id, { doneOnly: true }).catch(() => null) : null;
   if (!root.isConnected) return;
   const missing = status === "active" ? missingSupplementFields(original) : [];
+  const supplement = missing.length ? supplementForm(root, ctx, original.id, missing) : null;
   const amendment = status === "active" ? amendmentForm(root, ctx, plan) : null;
+  const check = status === "active" ? planCheckPanel({
+    load: () => db.latestPlanCheck(plan.id),
+    send: () => db.requestPlanCheck(plan.id),
+    changedAfter: (doneAt, result) =>
+      amendments.some((row) => planTimestamp(row.created_at) > planTimestamp(doneAt)) ||
+      result.issues.some(({ field, quote }) => {
+        const source = String(plan[field] ?? "").replace(/\s/g, "");
+        return quote ? !source.includes(quote.replace(/\s/g, "")) : source.length > 0;
+      }),
+    onFix(key) {
+      if (isPlanValueBlank(plan[key])) {
+        supplement?.focus(key);
+      } else if (amendablePlanFields.includes(key)) {
+        amendment.prefillPlanCheck(key);
+      }
+    },
+  }) : null;
   root.replaceChildren(
     heading(plan, statusLabel[status]),
     ...actionableAlerts(alerts).map(alertCard),
@@ -430,9 +485,11 @@ export async function render(root, ctx) {
     status === "active" ? h("a", { class: "btn pri", href: `#trade/${plan.id}` }, "記一筆成交") : "",
     planContent(plan, amendments, {
       missing,
-      supplement: missing.length > 0 && supplementForm(root, ctx, original.id, missing),
+      supplement: supplement?.form,
       counter: counterPanel(root, ctx, { ...original, status }, latestCounter, amendments, amendment?.prefillCounterView),
+      check: check?.panel ?? (latestClosedCheck?.result && planCheckResult(latestClosedCheck.result)),
     }),
+    checks && planChecksCard(checks),
     h("section", { class: "card" },
       h("h2", null, "修訂紀錄"),
       amendments.length ? h("ul", { class: "record-list" }, amendments.map((row) =>
@@ -457,4 +514,5 @@ export async function render(root, ctx) {
       h("p", null, `單筆復盤：${review.status === "done" ? "已完成" : "草稿"}，到期日 ${fmtDate(review.due_date)}`),
     ) : "",
   );
+  if (check) void check.refresh();
 }

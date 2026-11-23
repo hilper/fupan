@@ -24,6 +24,15 @@ function settingsForm(settings, { db, toast }) {
   const single = numberInput(settings.single_max_pct, 1, 100);
   const sector = numberInput(settings.sector_max_pct, 1, 100);
   const loss = numberInput(settings.loss_budget_pct, 0.1, 10);
+  const ruleFields = [
+    ["min_reward_risk", "賺賠比下限"],
+    ["stop_min_pct", "止損距離下限 %"],
+    ["stop_max_pct", "止損距離上限 %"],
+    ["low_conf_max_weight_pct", "信心低於 60 時倉位上限 %"],
+    ["mid_conf_max_weight_pct", "信心 60–79 時倉位上限 %"],
+  ].map(([key, label]) => ({ key, label, input: numberInput(settings[key], 0.01, 999.99) }));
+  const stopMin = ruleFields.find(({ key }) => key === "stop_min_pct").input;
+  const stopMax = ruleFields.find(({ key }) => key === "stop_max_pct").input;
   const save = h("button", { class: "btn pri", type: "submit" }, "儲存");
 
   return h("form", { class: "stack", novalidate: true, onsubmit: submit },
@@ -36,6 +45,7 @@ function settingsForm(settings, { db, toast }) {
       field("單一行業上限 %", sector),
       field("單筆最大虧損占總資產 %", loss),
     ),
+    section("紀律規則", ruleFields.map(({ label, input }) => field(label, input))),
     save,
   );
 
@@ -43,6 +53,8 @@ function settingsForm(settings, { db, toast }) {
     event.preventDefault();
     if (save.disabled) return;
 
+    const badStopRange = stopMin.valueAsNumber > 0 && stopMin.validity.valid &&
+      stopMax.valueAsNumber <= stopMin.valueAsNumber;
     const invalidFields = [
       showFieldError(date, date.validity.valid ? "" : "請輸入有效日期"),
       showFieldError(cash, Number.isFinite(cash.valueAsNumber) && cash.validity.valid
@@ -53,10 +65,16 @@ function settingsForm(settings, { db, toast }) {
         [loss, "請輸入 0.1–10 之間的百分比，最多兩位小數"],
       ].map(([input, message]) => showFieldError(input,
         Number.isFinite(input.valueAsNumber) && input.validity.valid ? "" : message)),
+      ...ruleFields.map(({ input }) => {
+        if (!(input.valueAsNumber > 0) || !input.validity.valid) {
+          return showFieldError(input, "請輸入 0.01–999.99 之間的數值，最多兩位小數");
+        }
+        return showFieldError(input, input === stopMax && badStopRange ? "上限須大於下限" : "");
+      }),
     ];
     const firstInvalid = invalidFields.indexOf(true);
     if (firstInvalid >= 0) {
-      [date, cash, single, sector, loss][firstInvalid].focus();
+      [date, cash, single, sector, loss, ...ruleFields.map(({ input }) => input)][firstInvalid].focus();
       return;
     }
 
@@ -68,6 +86,7 @@ function settingsForm(settings, { db, toast }) {
         single_max_pct: single.valueAsNumber,
         sector_max_pct: sector.valueAsNumber,
         loss_budget_pct: loss.valueAsNumber,
+        ...Object.fromEntries(ruleFields.map(({ key, input }) => [key, input.valueAsNumber])),
       });
       toast("已儲存");
     } catch (error) {

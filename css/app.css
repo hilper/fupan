@@ -409,6 +409,42 @@ dialog::backdrop {
   padding-inline: 4px;
 }
 
+.plan-checks-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-wrap: anywhere;
+}
+
+.plan-checks-list > li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.plan-check-warn::before {
+  flex: 0 0 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warn);
+  content: "";
+}
+
+.plan-checks summary,
+.plan-checks a {
+  text-decoration: underline;
+}
+
+.plan-checks summary {
+  cursor: pointer;
+}
+
+.plan-checks details .plan-checks-list {
+  margin-top: 6px;
+}
+
 .draft-summary {
   display: grid;
   gap: 6px;
@@ -523,6 +559,59 @@ dialog::backdrop {
   padding: 12px;
   border-radius: 8px;
   background: #f0efec;
+}
+
+.plan-check-panel, .plan-check-result, .plan-check-issues,
+.plan-check-issues > li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+}
+
+.plan-check-result {
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.plan-check-heading, .plan-check-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+.plan-check-panel h3, .plan-check-result h3 {
+  margin: 0;
+  font: 700 14px/1.5 var(--sans);
+}
+
+.plan-check-issues {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.plan-check-issues > li {
+  padding-top: 8px;
+  border-top: 1px solid var(--rule);
+}
+
+.plan-check-quote {
+  color: var(--muted);
+}
+
+.plan-check-panel .form-error {
+  overflow-wrap: anywhere;
+}
+
+.plan-check-actions .btn, .plan-check-fix {
+  padding-inline: 10px;
+  font-size: 12px;
+}
+
+.plan-check-fix {
+  justify-self: end;
 }
 
 .check-label {

@@ -35,6 +35,30 @@ export function toast(msg, kind) {
   setTimeout(() => notice.remove(), 5500);
 }
 
+export function planChecksCard(checks) {
+  const skipped = checks.filter(({ status }) => status === "skip");
+  const warnings = checks.filter(({ status }) => status === "warn").length;
+  const visible = checks.filter(({ status }) => status !== "skip");
+  return h("section", { class: "card plan-checks" },
+    h("div", { class: "record-head" },
+      h("h2", null, "紀律檢查"),
+      h("span", { class: "lbl" }, warnings ? `${warnings} 項提醒` : "沒有提醒"),
+    ),
+    visible.length > 0 && h("ul", { class: "plan-checks-list" }, visible.map(({ status, text }) =>
+      h("li", { class: status === "ok" ? "lbl" : "plan-check-warn" },
+        status === "ok" ? h("span", { "aria-hidden": "true" }, "✓") : null,
+        h("span", null, text),
+      ),
+    )),
+    skipped.length > 0 && h("details", null,
+      h("summary", { class: "lbl" }, `另有 ${skipped.length} 項資料不足`),
+      h("ul", { class: "plan-checks-list lbl" }, skipped.map(({ text }) => h("li", null, text))),
+    ),
+    h("p", { class: "lbl" }, "通用規則只是提醒，不擋鎖定；門檻可在",
+      h("a", { href: "#settings" }, "設定"), "調整"),
+  );
+}
+
 export function confirmDialog(text) {
   const dialog = h("dialog", { "aria-label": "確認操作" },
     h("form", { method: "dialog", class: "stack" },
@@ -255,7 +279,7 @@ export function confidenceField(value, label = planFields.confidence.label) {
   return { input, wrapper, get selected() { return choose.hidden; } };
 }
 
-function counterTime(value) {
+export function planTimestamp(value) {
   const fraction = (value?.match(/\.(\d+)/)?.[1] ?? "").padEnd(6, "0");
   const millis = Date.parse(value?.replace(/\.\d+/, "." + fraction.slice(0, 3)));
   // Postgres 保留到微秒，Date.parse 只保留到毫秒。
@@ -270,7 +294,7 @@ export function counterAdopted({ request, plan, amendments = [] }) {
   let latestTime = -Infinity;
   for (const row of amendments) {
     if (row.field !== "counter_view") continue;
-    const time = counterTime(row.created_at);
+    const time = planTimestamp(row.created_at);
     if (!latest || time > latestTime ||
         (time === latestTime && Number(row.id ?? 0) > Number(latest.id ?? 0))) {
       latest = row;
@@ -282,7 +306,7 @@ export function counterAdopted({ request, plan, amendments = [] }) {
   if ((current ?? "").replace(/\s/g, "") === view.replace(/\s/g, "")) {
     return { adopted: true, at: (latest ? latest.created_at : request.done_at) ?? null };
   }
-  if (request.done_at && latestTime > counterTime(request.done_at)) {
+  if (request.done_at && latestTime > planTimestamp(request.done_at)) {
     return { adopted: true, at: latest.created_at };
   }
   return { adopted: false, at: null };
@@ -319,6 +343,102 @@ export function counterViewResult(result, action) {
     h("p", { class: "lbl" }, "AI 只是幫你找反方，是否同意由你決定"),
     action,
   );
+}
+
+export function planCheckResult(result, { onFix, locked = false, stale = false } = {}) {
+  return h("div", { class: "plan-check-result" },
+    h("div", { class: "plan-check-heading" },
+      h("h3", null, "AI 體檢"),
+      stale && h("small", { class: "lbl" }, "卡片已修改，可重新體檢"),
+    ),
+    h("p", { class: "plan-read-text" }, result.summary),
+    result.issues.length ? h("ul", { class: "plan-check-issues" }, result.issues.map((issue) =>
+      h("li", null,
+        h("strong", null, planFields[issue.field].label),
+        issue.quote && h("p", { class: "plan-read-text plan-check-quote" }, `「${issue.quote}」`),
+        h("p", { class: "plan-read-text" }, `問題：${issue.problem}`),
+        h("p", { class: "plan-read-text" }, `可以這樣寫：${issue.suggestion}`),
+        locked && issue.field === "thesis"
+          ? h("small", { class: "lbl" }, "理由鎖定後不能改，留作下次寫卡的參考")
+          : onFix && h("button", {
+            class: "btn plan-check-fix", type: "button", onclick: () => onFix(issue.field),
+          }, "修改這欄"),
+      ),
+    )) : h("p", { class: "lbl" }, "沒有發現寫法上的問題"),
+    h("small", { class: "lbl" }, "AI 只檢查寫法是否可驗證，不判斷股票好壞；改不改由你決定"),
+  );
+}
+
+export function planCheckPanel({
+  load, send, onFix, canSend = () => true, changedAfter = () => false, draft = false,
+}) {
+  let request;
+  let errorText = "";
+  let busy = false;
+  let shownResult;
+  let shownStale;
+  const title = h("h3", null, "AI 體檢");
+  const resultNode = h("div", { hidden: true });
+  const statusText = h("p", { role: "status" });
+  const ask = h("button", { class: "btn", type: "button", onclick: () => {
+    if (!ask.disabled) void run(send);
+  } });
+  const refreshButton = h("button", {
+    class: "btn text-btn", type: "button", onclick: refresh,
+  }, "重新整理");
+  const panel = h("div", { class: "plan-check-panel" },
+    title, resultNode, h("div", { class: "plan-check-actions" }, ask, refreshButton), statusText,
+  );
+
+  function update() {
+    const { status, result, error, done_at: doneAt } = request ?? {};
+    const done = status === "done" && Boolean(result);
+    const waiting = status === "queued" || status === "running";
+    const stale = done && Boolean(doneAt) && changedAfter(doneAt, result);
+    const message = errorText || (status === "error" ? error || "AI 體檢處理失敗" : "");
+    statusText.textContent = message || (waiting ? draft
+      ? "已送出，Mac 約 1 分鐘內處理，可以先繼續填或鎖定"
+      : "AI 體檢處理中，約 1 分鐘後可重新整理" : "");
+    statusText.className = message ? "form-error" : "form-status";
+    statusText.hidden = !statusText.textContent;
+    ask.disabled = busy || waiting || !canSend();
+    ask.hidden = waiting;
+    ask.textContent = status === "error" ? "重試"
+      : stale || (done && !draft) ? "重新體檢" : "請 AI 體檢買入邏輯";
+    ask.classList.toggle("text-btn", done && !stale);
+    refreshButton.disabled = busy;
+    refreshButton.hidden = !waiting && !message;
+    title.hidden = done;
+    resultNode.hidden = !done;
+    const visibleResult = done ? result : null;
+    if (visibleResult !== shownResult || stale !== shownStale) {
+      shownResult = visibleResult;
+      shownStale = stale;
+      resultNode.replaceChildren(...(done ? [planCheckResult(result, { onFix, locked: !draft, stale })] : []));
+    }
+  }
+
+  async function run(action) {
+    if (busy) return;
+    busy = true;
+    update();
+    try {
+      request = await action();
+      errorText = "";
+    } catch (error) {
+      errorText = error.cause?.message ?? error.message;
+    } finally {
+      busy = false;
+      update();
+    }
+  }
+
+  function refresh() {
+    return run(load);
+  }
+
+  update();
+  return { panel, refresh, update };
 }
 
 export function readPlanInput(definition, input) {

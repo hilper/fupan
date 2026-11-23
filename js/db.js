@@ -1,3 +1,4 @@
+import { accuracyByConfidence } from "./calc.js";
 import { todayStr } from "./format.js";
 
 const settingsDefaults = {
@@ -6,6 +7,11 @@ const settingsDefaults = {
   single_max_pct: 20,
   sector_max_pct: 35,
   loss_budget_pct: 1,
+  min_reward_risk: 2,
+  stop_min_pct: 5,
+  stop_max_pct: 12,
+  low_conf_max_weight_pct: 5,
+  mid_conf_max_weight_pct: 10,
 };
 
 const settingsColumns = Object.keys(settingsDefaults).join(",");
@@ -69,10 +75,14 @@ export function createDb(client) {
       return data ?? { ...settingsDefaults };
     },
 
-    async saveSettings({ start_date, start_cash, single_max_pct, sector_max_pct, loss_budget_pct }) {
+    async saveSettings({
+      start_date, start_cash, single_max_pct, sector_max_pct, loss_budget_pct,
+      min_reward_risk, stop_min_pct, stop_max_pct, low_conf_max_weight_pct, mid_conf_max_weight_pct,
+    }) {
       await readResult("儲存設定失敗", () => client
         .from("settings").upsert({
           start_date, start_cash, single_max_pct, sector_max_pct, loss_budget_pct,
+          min_reward_risk, stop_min_pct, stop_max_pct, low_conf_max_weight_pct, mid_conf_max_weight_pct,
         }, { onConflict: "user_id" }));
     },
 
@@ -134,6 +144,21 @@ export function createDb(client) {
         .select(counterViewColumns).eq("kind", "counter_view").eq("plan_id", planId)
         .order("created_at", { ascending: false, nullsFirst: false }).order("id", { ascending: false })
         .limit(1).maybeSingle());
+    },
+
+    requestPlanCheck(planId) {
+      return readResult("送出 AI 體檢請求失敗", () => client.from("ai_requests")
+        .insert({ kind: "plan_check", plan_id: planId }).select(counterViewColumns).single());
+    },
+
+    latestPlanCheck(planId, { doneOnly = false } = {}) {
+      return readResult("讀取 AI 體檢請求失敗", () => {
+        const query = client.from("ai_requests").select(counterViewColumns)
+          .eq("kind", "plan_check").eq("plan_id", planId);
+        return (doneOnly ? query.eq("status", "done") : query)
+          .order("created_at", { ascending: false, nullsFirst: false })
+          .order("id", { ascending: false }).limit(1).maybeSingle();
+      });
     },
 
     lockPlan(id) {
@@ -277,6 +302,15 @@ export function createDb(client) {
     listExitReviewsWithPlan() {
       return readRows("讀取單筆復盤失敗", () => client.from("exit_reviews")
         .select("*,plans(name,confidence)").order("closed_date").order("id"));
+    },
+
+    async getPlanCheckHistory() {
+      const reviews = await readRows("讀取已完成單筆復盤失敗", () => client.from("exit_reviews")
+        .select("thesis_verdict,plans(confidence)").eq("status", "done").order("id"));
+      return accuracyByConfidence(reviews.map(({ plans, thesis_verdict }) => ({
+        confidence: plans?.confidence,
+        thesis_verdict,
+      })));
     },
 
     listNav() {
