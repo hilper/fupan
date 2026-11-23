@@ -184,6 +184,21 @@ export const planFields = {
   next_review_date: { label: "下次複查日", type: "date" },
 };
 
+export const supplementPlanFields = [
+  "catalyst", "catalyst_due", "expected_up_pct", "expected_down_pct", "invalidation",
+  "max_weight_pct", "add_condition", "add_price", "reduce_condition", "reduce_price",
+  "target", "target_price", "holding_period", "confidence", "counter_view", "emotion_source",
+];
+
+export function isPlanValueBlank(value) {
+  // 與資料庫 trim() 的空白判定一致。
+  return value == null || (typeof value === "string" && value.replaceAll(" ", "") === "");
+}
+
+export function missingSupplementFields(plan) {
+  return supplementPlanFields.filter((key) => isPlanValueBlank(plan[key]));
+}
+
 export function displayPlanValue(key, value) {
   if (value == null || value === "") return "—";
   const { type } = planFields[key] ?? {};
@@ -196,6 +211,7 @@ export function displayPlanValue(key, value) {
 export const amendablePlanFields = [
   "stop_price", "add_price", "reduce_price", "target_price", "max_weight_pct", "planned_weight_pct",
   "invalidation", "add_condition", "reduce_condition", "target", "holding_period", "catalyst", "catalyst_due",
+  "counter_view", "emotion_source", "confidence",
 ];
 
 export function allowedPlanAmendments(rows) {
@@ -217,6 +233,37 @@ export function planInput(definition, value) {
     max: definition.type === "range" ? 100 : null,
     value,
   });
+}
+
+export function confidenceField(value, label = planFields.confidence.label) {
+  const input = planInput(planFields.confidence, value ?? 50);
+  const wrapper = field(label, input);
+  const current = h("output", { for: input.id }, value == null ? "尚未設定" : `${value}%`);
+  const choose = h("button", {
+    class: "btn", type: "button", hidden: value != null,
+    onclick: () => input.dispatchEvent(new Event("change", { bubbles: true })),
+  }, "採用目前滑桿數值");
+
+  function selectValue() {
+    current.textContent = `${input.value}%`;
+    choose.hidden = true;
+  }
+
+  input.addEventListener("input", selectValue);
+  input.addEventListener("change", selectValue);
+  wrapper.append(current, choose);
+  return { input, wrapper, get selected() { return choose.hidden; } };
+}
+
+export function counterViewResult(result, action) {
+  return h("div", { class: "counter-result" },
+    h("strong", null, "AI 的看空理由"),
+    h("p", { class: "plan-read-text" }, result.counter_view),
+    result.invalidation_checkable === false && h("p", { class: "warn plan-read-text" },
+      `失效條件不易驗證：${result.invalidation_note}`),
+    h("p", { class: "lbl" }, "AI 只是幫你找反方，是否同意由你決定"),
+    action,
+  );
 }
 
 export function readPlanInput(definition, input) {

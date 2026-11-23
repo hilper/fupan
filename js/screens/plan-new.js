@@ -1,8 +1,8 @@
 import { addDays, planLossEstimate, symbolInfo } from "../calc.js";
 import { fmtPct, todayStr } from "../format.js";
 import {
-  confirmDialog, field, h, missingPlan, planFields, planInput, planSections, readPlanInput,
-  seg, setFieldError,
+  confidenceField, confirmDialog, counterViewResult, field, h, isPlanValueBlank, missingPlan,
+  planFields, planInput, planSections, readPlanInput, seg, setFieldError, supplementPlanFields,
 } from "../ui.js";
 
 const roles = ["核心", "成長", "周期", "交易", "觀察"].map((role) => ({ value: role, label: role }));
@@ -56,7 +56,7 @@ export async function render(root, ctx) {
     class: "btn text-btn counter-refresh", type: "button", hidden: true, onclick: loadCounterView,
   }, "重新整理");
   const counterStatus = h("p", { class: "form-status", role: "status" });
-  const counterResult = h("div", { class: "counter-result", hidden: true });
+  const counterResult = h("div", { hidden: true });
   const counterPanel = h("div", { class: "counter-panel" },
     h("div", { class: "counter-actions" }, askCounter, refreshCounter), counterStatus, counterResult,
   );
@@ -75,7 +75,7 @@ export async function render(root, ctx) {
     updateCounterButtons();
     const { status, error, result } = counterRequest ?? {};
     counterStatus.textContent = counterError || (
-      waitingForCounter() ? "已送出，Mac 約 10 分鐘內處理"
+      waitingForCounter() ? "已送出，Mac 約 1 分鐘內處理，可以先鎖定，結果之後在計劃卡上看"
         : status === "error" ? error || "反方觀點處理失敗" : ""
     );
     const hasError = Boolean(counterError || status === "error");
@@ -86,19 +86,10 @@ export async function render(root, ctx) {
     counterResult.replaceChildren();
     if (view) {
       counterResult.append(
-        h("strong", null, "AI 的看空理由"),
-        h("p", { class: "plan-read-text" }, view),
-      );
-      if (result.invalidation_checkable === false) {
-        counterResult.append(h("p", { class: "warn plan-read-text" },
-          `失效條件不易驗證：${result.invalidation_note}`));
-      }
-      counterResult.append(
-        h("button", { class: "btn", type: "button", onclick: () => {
+        counterViewResult(result, h("button", { class: "btn", type: "button", onclick: () => {
           counterInput.value = view;
           counterInput.dispatchEvent(new Event("input", { bubbles: true }));
-        } }, "採用到第 9 欄"),
-        h("p", { class: "lbl" }, "AI 只是幫你找反方，是否同意由你決定"),
+        } }, "採用到第 9 欄")),
       );
     }
   }
@@ -128,7 +119,6 @@ export async function render(root, ctx) {
         counterError = saveError.textContent;
         return;
       }
-      if (locking || !root.isConnected) return;
       counterRequest = await db.requestCounterView(id);
     } catch (error) {
       counterError = error.message;
@@ -217,22 +207,14 @@ export async function render(root, ctx) {
 
   function editor(key) {
     const definition = planFields[key];
-    const input = planInput(definition, values[key] ?? (key === "confidence" ? 50 : null));
+    const confidence = key === "confidence" ? confidenceField(values[key]) : null;
+    const input = confidence?.input ?? planInput(definition, values[key]);
     if (key === "counter_view") counterInput = input;
-    const wrapper = field(definition.label, input, definition.optional ? "可留空" : null);
-    const current = key === "confidence" && h("output", { for: input.id },
-      values[key] == null ? "尚未設定" : `${values[key]}%`);
-    const choose = current && h("button", {
-      class: "btn", type: "button", hidden: values[key] != null, onclick: () => read(true),
-    }, "採用目前滑桿數值");
+    const wrapper = confidence?.wrapper ?? field(definition.label, input, definition.optional ? "可留空" : null);
 
     function read(commit) {
       const { value, error } = readPlanInput(definition, input);
       updateField(key, wrapper, input, value, error);
-      if (current) {
-        current.textContent = `${value}%`;
-        choose.hidden = true;
-      }
       if (key === "next_review_date") {
         reviewedDate = false;
         dateSeen.checked = false;
@@ -244,30 +226,30 @@ export async function render(root, ctx) {
 
     input.addEventListener("input", () => read(false));
     input.addEventListener("change", () => read(true));
-    if (current) wrapper.append(current, choose);
     return wrapper;
   }
 
-  const sections = planSections.map(([title, keys], index) => {
+  const sections = [];
+  function step(index, keys, calculation) {
+    const [title] = planSections[index];
     const state = h("span", { class: "lbl" });
     const number = h("span", { class: "plan-step", "aria-hidden": "true" }, index + 1);
     const fields = new Map(keys.map((key) => [key, editor(key)]));
-    const pair = (...items) => h("div", { class: "grid-two" }, items.map((key) => fields.get(key)));
+    const pair = (items) => h("div", { class: "grid-two" }, items.map((key) => fields.get(key)));
     let content = [...fields.values()];
-    if (index === 2) content = [pair(...keys), ratio];
-    if (index === 4) content = [pair(...keys), loss];
-    if (index === 5) content = [pair(...keys.slice(0, 2)), pair(...keys.slice(2))];
+    if (index === 2) content = [pair(keys)];
+    if (index === 5) content = [pair(keys.slice(0, 2)), pair(keys.slice(2))];
     if (index === 8) content.unshift(counterPanel);
-    return {
-      title, keys, state, number,
-      card: h("section", { class: "card plan-step-card" },
-        h("header", { class: "plan-step-heading" }, number, h("h2", null, title), state),
-        content,
-      ),
-    };
-  });
+    sections.push({ keys, state, number });
+    return h("section", { class: "card plan-step-card" },
+      h("header", { class: "plan-step-heading" }, number, h("h2", null, title), state),
+      content, calculation,
+    );
+  }
 
+  const optionalSummary = h("summary");
   const formContent = h("fieldset", { class: "stack plan-form-fields" },
+    h("h2", null, "鎖定前必填"),
     h("section", { class: "card" },
       h("div", { class: "grid-two" }, codeField, nameField),
       market, sectorField,
@@ -279,14 +261,22 @@ export async function render(root, ctx) {
         }, "plan-role-label"),
       ),
     ),
-    sections.map(({ card }) => card),
+    step(0, ["thesis"]),
+    step(3, ["stop_price"]),
+    step(4, ["planned_weight_pct"], loss),
     h("section", { class: "card" }, editor("next_review_date"),
       h("label", { class: "check-label" }, dateSeen, "我已確認下次複查日")),
     h("div", { class: "card" }, lock, missing, lockError),
+    h("details", { class: "plan-optional" }, optionalSummary, h("div", { class: "stack" },
+      planSections.map(([, keys], index) => {
+        const optionalKeys = keys.filter((key) => supplementPlanFields.includes(key));
+        return optionalKeys.length ? step(index, optionalKeys, index === 2 ? ratio : null) : null;
+      }),
+    )),
   );
 
   root.append(h("div", { class: "draft-summary" },
-    h("div", { class: "record-head" }, completion, h("p", { class: "lbl" }, "寫完鎖定，之後只能追加修訂")),
+    completion,
     saveStatus, saveError, retry,
   ), h("form", { onsubmit: lockDraft, novalidate: true }, formContent));
   refresh();
@@ -297,21 +287,25 @@ export async function render(root, ctx) {
   }
 
   function filled(key) {
-    return values[key] != null && values[key] !== "" && !invalid.has(key);
+    return !isPlanValueBlank(values[key]) && !invalid.has(key);
   }
 
   function refresh() {
-    const incomplete = [];
     for (const section of sections) {
       const complete = section.keys.every((key) => filled(key) || planFields[key].optional && !invalid.has(key));
       section.state.textContent = complete ? "已填" : "未完成";
       section.number.classList.toggle("done", complete);
-      if (!complete) incomplete.push(section.title);
     }
-    completion.textContent = `已完成 ${sections.length - incomplete.length} / 10`;
-    const remaining = [...incomplete];
-    if (!identityComplete()) remaining.unshift("代碼、名稱與行業");
-    if (!reviewedDate || !filled("next_review_date")) remaining.push("確認下次複查日");
+    const optionalFilled = supplementPlanFields.filter(filled).length;
+    optionalSummary.textContent = `其他項目（可鎖定後再補）· 已填 ${optionalFilled} / ${supplementPlanFields.length}`;
+    const required = [
+      [filled("symbol") && filled("name"), "代碼與名稱"],
+      [filled("sector"), "行業"],
+      ...["thesis", "stop_price", "planned_weight_pct"].map((key) => [filled(key), planFields[key].label]),
+      [reviewedDate && filled("next_review_date"), "確認下次複查日"],
+    ];
+    const remaining = required.filter(([done]) => !done).map(([, label]) => label);
+    completion.textContent = `必填 ${required.length - remaining.length} / ${required.length}`;
     missing.textContent = remaining.length ? `尚需完成：${remaining.join("、")}` : "";
     lock.disabled = locking || Boolean(remaining.length);
     formContent.disabled = locking;
@@ -324,7 +318,8 @@ export async function render(root, ctx) {
     const estimate = filled("planned_weight_pct") && filled("expected_down_pct") && planLossEstimate(values, settings);
     loss.textContent = estimate
       ? `觸發止損時組合虧損 ${fmtPct(estimate.pct)}${estimate.over ? ` · 超過單筆虧損上限 ${fmtPct(settings.loss_budget_pct)}` : ""}`
-      : "觸發止損時組合虧損 —";
+      : "";
+    loss.hidden = !estimate;
     loss.classList.toggle("warn", Boolean(estimate?.over));
   }
 
@@ -382,7 +377,7 @@ export async function render(root, ctx) {
     locking = true;
     refresh();
     try {
-      if (!await confirmDialog("鎖定後內容不能修改，只能追加修訂。確定鎖定？")) return;
+      if (!await confirmDialog("鎖定後已填的內容不能修改；空白的項目之後可以補填一次。確定鎖定？")) return;
       readyToCreate = true;
       if (!await flush()) {
         lockError.textContent = saveError.textContent;

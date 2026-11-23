@@ -1,6 +1,6 @@
 import { buildPositions, effectivePlan, snapshot } from "../calc.js";
 import { fmtDate, fmtMoney, fmtPct, todayStr } from "../format.js";
-import { allowedPlanAmendments, detailsValue, h, pnlColor } from "../ui.js";
+import { allowedPlanAmendments, detailsValue, h, missingSupplementFields, pnlColor } from "../ui.js";
 
 const evidenceLabels = { strengthen: "強化", weaken: "削弱", none: "不變" };
 
@@ -17,8 +17,10 @@ export async function loadPortfolio(db, today) {
   const held = [...buildPositions(trades, today).values()].filter((position) => position.quantity > 0);
   const latestPrices = await db.latestPrices(held.map((position) => position.symbol));
   const effective = plans.map((plan) => effectivePlan(plan, byPlan.get(plan.id) ?? []));
+  const pendingCounts = new Map(plans.filter((plan) => plan.status === "active")
+    .map((plan) => [plan.id, missingSupplementFields(plan).length]));
   const portfolio = snapshot({ settings, plans: effective, trades, cashFlows, latestPrices, fxRows, today });
-  return { settings, plans: effective, portfolio, latestPrices };
+  return { settings, plans: effective, portfolio, latestPrices, pendingCounts };
 }
 
 const newPlanLink = () => h("a", { class: "btn pri", href: "#plan-new" }, "＋ 新計劃卡");
@@ -46,12 +48,17 @@ function riskCard(portfolio, settings) {
   );
 }
 
-function holdingRow(position, evidence, today) {
+function pendingLabel(count) {
+  return count > 0 && h("span", { class: "plan-pending" }, `待補 ${count}`);
+}
+
+function holdingRow(position, evidence, today, pending) {
   const { plan, weight_pct, pnl_pct, stop_dist_pct } = position;
   const overdue = plan.next_review_date && plan.next_review_date <= today;
   return h("a", { class: "record holding-row", href: `#plan/${plan.id}` },
     h("div", { class: "holding-name" },
       h("strong", null, plan.name),
+      pendingLabel(pending),
       h("span", { class: "lbl" }, plan.symbol),
       h("span", { class: evidence === "weaken" ? "chip warn" : "chip" }, evidenceLabels[evidence] ?? "尚無證據"),
     ),
@@ -64,16 +71,21 @@ function holdingRow(position, evidence, today) {
   );
 }
 
-function planList(title, plans, route, reviewStatuses) {
+function planList(title, plans, route, reviewStatuses, pendingCounts) {
   if (!plans.length) return null;
   return h("section", { class: "card" },
     h("h2", null, title),
     plans.map((plan) => {
       const reviewLabel = reviewStatuses?.get(plan.id) === "done" ? "已完成" : "待寫";
+      const pending = pendingCounts.get(plan.id);
       return h("a", { class: "record record-head plan-link", href: `#${route}/${plan.id}` },
         reviewStatuses ? h("div", { class: "record-meta" },
           h("strong", null, plan.name), h("span", { class: "lbl" }, plan.symbol),
-        ) : [h("strong", null, plan.name), h("span", { class: "lbl" }, plan.symbol)],
+        ) : [
+          pending > 0 ? h("div", { class: "holding-name" },
+            h("strong", null, plan.name), pendingLabel(pending)) : h("strong", null, plan.name),
+          h("span", { class: "lbl" }, plan.symbol),
+        ],
         reviewStatuses && h("span", { class: "lbl" }, `復盤：${reviewLabel}`),
       );
     }),
@@ -82,7 +94,7 @@ function planList(title, plans, route, reviewStatuses) {
 
 export async function render(root, { db }) {
   const today = todayStr();
-  const [{ settings, plans, portfolio }, evidence] = await Promise.all([
+  const [{ settings, plans, portfolio, pendingCounts }, evidence] = await Promise.all([
     loadPortfolio(db, today), db.listEvidenceDirections(),
   ]);
   const held = portfolio.positions.filter(({ plan }) => plan.status === "active");
@@ -114,7 +126,7 @@ export async function render(root, { db }) {
   }
   root.append(h("section", { class: "card holdings-list" },
     h("h2", null, "持有中"),
-    held.length ? held.map((pos) => holdingRow(pos, evidence.get(pos.plan.id), today))
+    held.length ? held.map((pos) => holdingRow(pos, evidence.get(pos.plan.id), today, pendingCounts.get(pos.plan.id)))
       : h("p", { class: "lbl" }, "目前沒有持倉"),
   ));
   for (const [title, group, route, statuses] of [
@@ -122,7 +134,7 @@ export async function render(root, { db }) {
     ["草稿", plans.filter((plan) => plan.status === "draft"), "plan-new"],
     ["已清倉", closed, "plan", reviewStatuses],
   ]) {
-    const section = planList(title, group, route, statuses);
+    const section = planList(title, group, route, statuses, pendingCounts);
     if (section) root.append(section);
   }
 }

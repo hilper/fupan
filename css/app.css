@@ -418,6 +418,30 @@ dialog::backdrop {
   background: var(--surface);
 }
 
+.plan-optional > summary,
+.plan-supplement > summary {
+  cursor: pointer;
+}
+
+.plan-optional > summary {
+  min-height: 44px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  font-size: 14px;
+}
+
+.plan-optional > div,
+.plan-supplement > form {
+  margin-top: 10px;
+}
+
+.plan-pending {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .plan-step-heading {
   display: grid;
   grid-template-columns: 24px minmax(0, 1fr) auto;
@@ -504,6 +528,10 @@ dialog::backdrop {
 .details-value p, .plan-read-text {
   font-size: 14px;
   white-space: pre-wrap;
+}
+
+.plan-read-section .details-value p, .plan-read-text, .counter-panel .form-error {
+  overflow-wrap: anywhere;
 }
 
 .plan-read-section {

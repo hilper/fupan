@@ -1,8 +1,9 @@
 import { addDays, buildPositions, effectivePlan, tradeReturn } from "../calc.js";
 import { fmtDate, fmtMoney, fmtPct, todayStr } from "../format.js";
 import {
-  allowedPlanAmendments, amendablePlanFields, detailsValue, displayPlanValue, field, h,
-  missingPlan, planFields, planInput, planSections, pnlColor, readPlanInput, setFieldError,
+  allowedPlanAmendments, amendablePlanFields, confidenceField, counterViewResult, detailsValue,
+  displayPlanValue, field, h, isPlanValueBlank, missingPlan, missingSupplementFields, planFields,
+  planInput, planSections, pnlColor, readPlanInput, setFieldError,
 } from "../ui.js";
 import { actionableAlerts, alertCard } from "./alert.js";
 import { evidenceLogRow } from "./evidence.js";
@@ -46,25 +47,144 @@ export async function finalizeClose(db, plan, today) {
   return review;
 }
 
-function planContent(plan, amendments) {
+function planContent(plan, amendments, { missing = [], supplement, counter } = {}) {
   const draft = plan.status === "draft";
   const sections = planSections.map(([title, keys], index) => {
-    const visible = draft ? keys.filter((key) => plan[key] != null && plan[key] !== "") : keys;
-    if (!visible.length) return null;
     return h("section", { class: "plan-read-section" },
       h("h3", null, `${index + 1}　${title}`),
-      visible.map((key) => detailsValue(planFields[key].label, displayPlanValue(key, plan[key]), "",
-        plan.amended?.has(key))),
+      keys.map((key) => {
+        const blank = isPlanValueBlank(plan[key]);
+        return detailsValue(planFields[key].label, blank ? "待補" : displayPlanValue(key, plan[key]),
+          blank ? "plan-pending" : "", plan.amended?.has(key));
+      }),
       index === 2 && plan.expected_up_pct != null && Number(plan.expected_down_pct) > 0 &&
         h("p", { class: "lbl" }, `賺賠比 ${(plan.expected_up_pct / plan.expected_down_pct).toFixed(1)} : 1`),
+      index === 8 && counter,
     );
   });
   return h("section", { class: "card" },
-    h("div", { class: "record-head" }, h("h2", null, "計劃卡"),
+    h("div", { class: "record-head" },
+      h("div", { class: "record-meta" }, h("h2", null, "計劃卡"),
+        missing.length > 0 && h("span", { class: "plan-pending" }, `待補 ${missing.length} 項`)),
       !draft && h("span", { class: "lbl" }, `${fmtDate(plan.locked_at)} 鎖定 · 修訂 ${amendments.length} 次`)),
+    supplement,
     sections,
     draft && plan.next_review_date && detailsValue("下次複查日", fmtDate(plan.next_review_date)),
   );
+}
+
+async function saveSupplement(root, ctx, planId, values) {
+  await ctx.db.supplementPlan(planId, values);
+  ctx.toast("已補填");
+  if (root.isConnected) await render(root, ctx);
+}
+
+function supplementForm(root, ctx, planId, missing) {
+  const controls = missing.map((key) => {
+    const definition = planFields[key];
+    const confidence = key === "confidence" ? confidenceField() : null;
+    const input = confidence?.input ?? planInput(definition);
+    const wrapper = confidence?.wrapper ?? field(definition.label, input);
+    input.addEventListener("input", () => {
+      setFieldError(wrapper, input, readPlanInput(definition, input).error);
+    });
+    return { key, definition, input, wrapper, confidence };
+  });
+  const errorText = h("p", { class: "form-error", role: "alert" });
+  const inputs = h("fieldset", { class: "form-stack plan-form-fields" },
+    controls.map(({ wrapper }) => wrapper),
+    h("button", { type: "submit", class: "btn pri" }, "儲存補填"),
+  );
+
+  async function save(event) {
+    event.preventDefault();
+    if (inputs.disabled) return;
+    errorText.textContent = "";
+    const values = {};
+    let invalid = false;
+    for (const { key, definition, input, wrapper, confidence } of controls) {
+      if (confidence && !confidence.selected) continue;
+      const { value, error } = readPlanInput(definition, input);
+      setFieldError(wrapper, input, error);
+      if (error) invalid = true;
+      else if (!isPlanValueBlank(value)) values[key] = value;
+    }
+    if (invalid) return;
+    if (!Object.keys(values).length) {
+      errorText.textContent = "請至少補填一項";
+      return;
+    }
+    inputs.disabled = true;
+    try {
+      await saveSupplement(root, ctx, planId, values);
+    } catch (error) {
+      errorText.textContent = error.cause?.message ?? error.message;
+    } finally {
+      inputs.disabled = false;
+    }
+  }
+
+  return h("details", { class: "plan-supplement" },
+    h("summary", { class: "btn" }, "補填空白項目"),
+    h("form", { class: "form-stack", onsubmit: save, novalidate: true }, inputs, errorText),
+  );
+}
+
+function counterPanel(root, ctx, plan, latest, prefillCounterView) {
+  const active = plan.status === "active";
+  const panel = h("div", { class: "counter-panel" });
+  const statusText = h("p", { class: "form-status", role: "status" });
+  const errorText = h("p", { class: "form-error", role: "alert" });
+  let request = latest.request;
+  let loadError = latest.error;
+
+  function action(label, run) {
+    return h("button", { class: "btn", type: "button", onclick: async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      errorText.textContent = "";
+      try {
+        await run();
+      } catch (error) {
+        errorText.textContent = error.cause?.message ?? error.message;
+      } finally {
+        button.disabled = false;
+      }
+    } }, label);
+  }
+
+  function show() {
+    const { status, error, result } = request ?? {};
+    const waiting = status === "queued" || status === "running";
+    const refresh = (waiting || loadError) && action("重新整理", async () => {
+      request = await ctx.db.latestCounterView(plan.id);
+      loadError = "";
+      show();
+    });
+    const ask = (status === "error" || (!status && !loadError && active)) &&
+      action(status === "error" ? "重新請 AI 寫" : "請 AI 寫最強的看空理由", async () => {
+        request = await ctx.db.requestCounterView(plan.id);
+        show();
+      });
+    const adopt = active && status === "done" && result?.counter_view && (
+      isPlanValueBlank(plan.counter_view)
+        ? action("補填到第 9 欄", () => saveSupplement(root, ctx, plan.id, { counter_view: result.counter_view }))
+        : h("button", { class: "btn", type: "button", onclick: () => prefillCounterView(result.counter_view) },
+          "追加為修訂")
+    );
+    statusText.textContent = waiting ? "AI 反方觀點處理中" : "";
+    errorText.textContent = loadError || (status === "error" ? error || "反方觀點處理失敗" : "");
+    const children = [
+      statusText,
+      (refresh || ask) && h("div", { class: "counter-actions" }, refresh, ask),
+      status === "done" && result?.counter_view && counterViewResult(result, adopt),
+      errorText,
+    ];
+    panel.replaceChildren(...children.filter(Boolean));
+  }
+
+  show();
+  return panel;
 }
 
 function heading(plan, status) {
@@ -93,8 +213,9 @@ function positionCard(plan, held, position, quote) {
 }
 
 function amendmentForm(root, ctx, plan) {
+  const labels = { emotion_source: "情緒與來源", confidence: "信心" };
   const select = h("select", null, amendablePlanFields.map((key) =>
-    h("option", { value: key }, planFields[key].label)));
+    h("option", { value: key }, labels[key] ?? planFields[key].label)));
   const valueField = h("div");
   const reason = h("textarea", { rows: 2, required: true });
   const reasonField = field("修訂理由", reason, "至少 4 字");
@@ -102,11 +223,13 @@ function amendmentForm(root, ctx, plan) {
   const submit = h("button", { type: "submit", class: "btn pri" }, "追加修訂");
   let input;
   let wrapper;
+  let confidence;
 
-  function updateInput() {
+  function updateInput(value) {
     const definition = planFields[select.value];
-    input = planInput(definition);
-    wrapper = field("新值", input);
+    confidence = select.value === "confidence" ? confidenceField(value, "新值") : null;
+    input = confidence?.input ?? planInput(definition, value);
+    wrapper = confidence?.wrapper ?? field("新值", input);
     valueField.replaceChildren(wrapper);
     input.addEventListener("input", () => {
       setFieldError(wrapper, input, readPlanInput(definition, input).error);
@@ -118,7 +241,7 @@ function amendmentForm(root, ctx, plan) {
     if (formFields.disabled) return;
     errorText.textContent = "";
     const { value, error } = readPlanInput(planFields[select.value], input);
-    const valueError = error || (value == null || value === "" ? "請填寫新值" : "");
+    const valueError = error || (isPlanValueBlank(value) || (confidence && !confidence.selected) ? "請填寫新值" : "");
     const why = reason.value.trim();
     const reasonError = [...why].length < 4 ? "理由至少 4 字" : "";
     setFieldError(wrapper, input, valueError);
@@ -139,14 +262,26 @@ function amendmentForm(root, ctx, plan) {
     }
   }
 
-  select.addEventListener("change", updateInput);
+  select.addEventListener("change", () => updateInput());
   updateInput();
   const formFields = h("fieldset", { class: "form-stack plan-form-fields" },
     field("修訂欄位", select), valueField, reasonField, submit,
   );
-  return h("form", { class: "flow-form form-stack", onsubmit: save, novalidate: true },
+  const form = h("form", { class: "flow-form form-stack", onsubmit: save, novalidate: true },
     formFields, errorText,
   );
+  return {
+    form,
+    prefillCounterView(value) {
+      if (formFields.disabled) return;
+      select.value = "counter_view";
+      updateInput(value);
+      reason.value = "採用 AI 反方觀點";
+      setFieldError(reasonField, reason);
+      errorText.textContent = "";
+      input.focus();
+    },
+  };
 }
 
 function reviewCard(root, ctx, plan, today) {
@@ -228,21 +363,26 @@ export async function render(root, ctx) {
   if (!root.isConnected) return;
   if (!original) return missingPlan(root);
   setTitle(original.name);
-  const related = [db.listOpenAlerts(original.id), db.listEvidence(original.id)];
+  const related = [
+    db.listOpenAlerts(original.id),
+    db.listEvidence(original.id),
+    db.latestCounterView(original.id).then((request) => ({ request }),
+      (error) => ({ error: error.cause?.message ?? error.message })),
+  ];
   if (original.status === "draft") {
-    const [alerts, evidence] = await Promise.all(related);
+    const [alerts, evidence, latestCounter] = await Promise.all(related);
     if (!root.isConnected) return;
     root.replaceChildren(heading(original, "草稿"),
       ...actionableAlerts(alerts).map(alertCard),
       h("a", { class: "btn pri", href: `#plan-new/${original.id}` }, "繼續編輯"),
-      planContent(original, []),
+      planContent(original, [], { counter: counterPanel(root, ctx, original, latestCounter) }),
       evidenceLog(original, evidence),
     );
     return;
   }
 
   const today = todayStr();
-  const [amendments, trades, alerts, evidence] = await Promise.all([
+  const [amendments, trades, alerts, evidence, latestCounter] = await Promise.all([
     db.listAmendments(original.id), db.listTrades(original.id),
     ...related,
   ]);
@@ -273,12 +413,18 @@ export async function render(root, ctx) {
 
   const statusLabel = { closed: "已清倉", active: held?.quantity > 0 ? "持有中" : "已鎖定未買入" };
   if (!root.isConnected) return;
+  const missing = status === "active" ? missingSupplementFields(original) : [];
+  const amendment = status === "active" ? amendmentForm(root, ctx, plan) : null;
   root.replaceChildren(
     heading(plan, statusLabel[status]),
     ...actionableAlerts(alerts).map(alertCard),
     positionCard(plan, held, position, quote),
     status === "active" ? h("a", { class: "btn pri", href: `#trade/${plan.id}` }, "記一筆成交") : "",
-    planContent(plan, amendments),
+    planContent(plan, amendments, {
+      missing,
+      supplement: missing.length > 0 && supplementForm(root, ctx, original.id, missing),
+      counter: counterPanel(root, ctx, { ...original, status }, latestCounter, amendment?.prefillCounterView),
+    }),
     h("section", { class: "card" },
       h("h2", null, "修訂紀錄"),
       amendments.length ? h("ul", { class: "record-list" }, amendments.map((row) =>
@@ -292,7 +438,7 @@ export async function render(root, ctx) {
           h("p", { class: "record-note" }, row.reason),
         ),
       )) : h("p", { class: "lbl" }, "尚無修訂"),
-      status === "active" ? amendmentForm(root, ctx, plan) : "",
+      amendment?.form,
     ),
     evidenceLog(plan, evidence),
     reviewCard(root, ctx, plan, today),

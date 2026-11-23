@@ -119,6 +119,11 @@ export function createDb(client) {
         .from("plans").update(values).eq("id", id).eq("status", "draft").select().single());
     },
 
+    supplementPlan(id, values) {
+      return readResult("補填計劃卡失敗", () => client
+        .from("plans").update(values).eq("id", id).not("locked_at", "is", null).select().single());
+    },
+
     requestCounterView(planId) {
       return readResult("送出反方觀點請求失敗", () => client.from("ai_requests")
         .insert({ kind: "counter_view", plan_id: planId }).select(counterViewColumns).single());
