@@ -369,14 +369,14 @@ function aiCounterViewBody(view) {
   ];
 }
 
-export function aiCounterViewCard(views, { active }) {
+export function aiCounterViewBlock(views, { active }) {
   const [latest, ...older] = views;
   if (!latest && !active) return null;
   const history = older.filter((view) => view.changed);
   const lastChange = history[0];
-  return h("section", { class: "card ai-counter-card" },
+  return h("div", { class: "ai-counter-card", id: "ai-counter" },
     h("div", { class: "record-head" },
-      h("h2", null, "AI 反方觀點"),
+      h("span", { class: "lbl" }, "AI 每日版"),
       h("span", { class: "lbl" }, "第三方 · 每個交易日更新"),
     ),
     latest ? [

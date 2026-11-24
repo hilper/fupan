@@ -565,6 +565,10 @@ dialog::backdrop {
   overflow-wrap: anywhere;
 }
 
+.ai-counter-card {
+  margin-top: 4px;
+}
+
 .ai-counter-sources {
   margin: 0;
   padding-inline-start: 18px;
@@ -598,14 +602,14 @@ dialog::backdrop {
   font-size: 12px;
 }
 
-.plan-check-panel, .plan-check-result, .plan-check-issues,
+.ai-counter-card, .plan-check-panel, .plan-check-result, .plan-check-issues,
 .plan-check-issues > li {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 8px;
 }
 
-.plan-check-result {
+.ai-counter-card, .plan-check-result {
   padding: 12px;
   border-radius: 8px;
   background: var(--bg);

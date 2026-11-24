@@ -56,7 +56,17 @@ function aiCard(evidence) {
 
 function counterUpdateCard(update) {
   const name = [update.plans?.symbol, update.plans?.name].filter(Boolean).join("／");
-  return h("a", { class: "card action-card ai-counter-update", href: `#plan/${update.plan_id}` },
+  return h("a", {
+    class: "card action-card ai-counter-update",
+    href: `#plan/${update.plan_id}`,
+    onclick() {
+      try {
+        sessionStorage.setItem("fupan:scroll-counter", update.plan_id);
+      } catch {
+        // sessionStorage 可能無法存取。
+      }
+    },
+  },
     h("p", null, h("strong", null, name), ` · ${shortDate(update.view_date, false)} · ${update.change_note}`,
       update.invalidation_status === "triggered" && h("span", { class: "warn" }, " · 失效條件可能已成立"),
     ),

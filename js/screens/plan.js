@@ -1,7 +1,7 @@
 import { addDays, buildPositions, effectivePlan, planChecks, tradeReturn } from "../calc.js";
 import { fmtDate, fmtMoney, fmtPct, todayStr } from "../format.js";
 import {
-  aiCounterViewCard, allowedPlanAmendments, amendablePlanFields, confidenceField,
+  aiCounterViewBlock, allowedPlanAmendments, amendablePlanFields, confidenceField,
   detailsValue, displayPlanValue, field, h, isPlanValueBlank, missingPlan,
   missingSupplementFields, planCheckPanel, planCheckResult, planChecksCard, planFields,
   planInput, planSections, planTimestamp, pnlColor, readPlanInput, setFieldError,
@@ -48,19 +48,20 @@ export async function finalizeClose(db, plan, today) {
   return review;
 }
 
-function planContent(plan, amendments, { missing = [], supplement, check } = {}) {
+function planContent(plan, amendments, { missing = [], supplement, counterViewBlock, check } = {}) {
   const draft = plan.status === "draft";
   const sections = planSections.map(([title, keys], index) => {
     return h("section", { class: "plan-read-section" },
       h("h3", null, `${index + 1}　${title}`),
       keys.map((key) => {
         const blank = isPlanValueBlank(plan[key]);
-        return detailsValue(planFields[key].label, blank ? "待補" : displayPlanValue(key, plan[key]),
+        const label = index === 8 && key === "counter_view" ? "我寫的" : planFields[key].label;
+        return detailsValue(label, blank ? "待補" : displayPlanValue(key, plan[key]),
           blank ? "plan-pending" : "", plan.amended?.has(key));
       }),
       index === 2 && plan.expected_up_pct != null && Number(plan.expected_down_pct) > 0 &&
         h("p", { class: "lbl" }, `賺賠比 ${(plan.expected_up_pct / plan.expected_down_pct).toFixed(1)} : 1`),
-      index === 8 && check,
+      index === 8 && !draft && counterViewBlock,
     );
   });
   return h("section", { class: "card" },
@@ -70,6 +71,7 @@ function planContent(plan, amendments, { missing = [], supplement, check } = {})
       !draft && h("span", { class: "lbl" }, `${fmtDate(plan.locked_at)} 鎖定 · 修訂 ${amendments.length} 次`)),
     supplement,
     sections,
+    check && h("section", { class: "plan-read-section" }, check),
     draft && plan.next_review_date && detailsValue("下次複查日", fmtDate(plan.next_review_date)),
   );
 }
@@ -421,9 +423,9 @@ export async function render(root, ctx) {
     planContent(plan, amendments, {
       missing,
       supplement: supplement?.form,
+      counterViewBlock: counterViews && aiCounterViewBlock(counterViews, { active: status === "active" }),
       check: check?.panel ?? (latestClosedCheck?.result && planCheckResult(latestClosedCheck.result)),
     }),
-    counterViews && aiCounterViewCard(counterViews, { active: status === "active" }),
     checks && planChecksCard(checks),
     h("section", { class: "card" },
       h("h2", null, "修訂紀錄"),
@@ -449,6 +451,14 @@ export async function render(root, ctx) {
       h("p", null, `單筆復盤：${review.status === "done" ? "已完成" : "草稿"}，到期日 ${fmtDate(review.due_date)}`),
     ) : "",
   );
+  try {
+    if (sessionStorage.getItem("fupan:scroll-counter") === String(plan.id)) {
+      sessionStorage.removeItem("fupan:scroll-counter");
+      root.querySelector("#ai-counter")?.closest(".plan-read-section")?.scrollIntoView({ block: "start" });
+    }
+  } catch {
+    // sessionStorage 可能無法存取。
+  }
   if (counterViews?.length) void db.markCounterViewsSeen(plan.id).catch(() => {});
   if (check) void check.refresh();
 }
