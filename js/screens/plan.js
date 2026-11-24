@@ -1,8 +1,8 @@
 import { addDays, buildPositions, effectivePlan, planChecks, tradeReturn } from "../calc.js";
 import { fmtDate, fmtMoney, fmtPct, todayStr } from "../format.js";
 import {
-  adoptedCounterView, allowedPlanAmendments, amendablePlanFields, confidenceField, counterAdopted,
-  counterViewResult, detailsValue, displayPlanValue, field, h, isPlanValueBlank, missingPlan,
+  aiCounterViewCard, allowedPlanAmendments, amendablePlanFields, confidenceField,
+  detailsValue, displayPlanValue, field, h, isPlanValueBlank, missingPlan,
   missingSupplementFields, planCheckPanel, planCheckResult, planChecksCard, planFields,
   planInput, planSections, planTimestamp, pnlColor, readPlanInput, setFieldError,
 } from "../ui.js";
@@ -48,7 +48,7 @@ export async function finalizeClose(db, plan, today) {
   return review;
 }
 
-function planContent(plan, amendments, { missing = [], supplement, counter, check } = {}) {
+function planContent(plan, amendments, { missing = [], supplement, check } = {}) {
   const draft = plan.status === "draft";
   const sections = planSections.map(([title, keys], index) => {
     return h("section", { class: "plan-read-section" },
@@ -60,7 +60,6 @@ function planContent(plan, amendments, { missing = [], supplement, counter, chec
       }),
       index === 2 && plan.expected_up_pct != null && Number(plan.expected_down_pct) > 0 &&
         h("p", { class: "lbl" }, `賺賠比 ${(plan.expected_up_pct / plan.expected_down_pct).toFixed(1)} : 1`),
-      index === 8 && counter,
       index === 8 && check,
     );
   });
@@ -140,70 +139,6 @@ function supplementForm(root, ctx, planId, missing) {
       control.input.focus({ preventScroll: true });
     },
   };
-}
-
-function counterPanel(root, ctx, plan, latest, amendments = [], prefillCounterView) {
-  const active = plan.status === "active";
-  const panel = h("div", { class: "counter-panel" });
-  const statusText = h("p", { class: "form-status", role: "status" });
-  const errorText = h("p", { class: "form-error", role: "alert" });
-  let request = latest.request;
-  let loadError = latest.error;
-
-  function action(label, run) {
-    return h("button", { class: "btn", type: "button", onclick: async (event) => {
-      const button = event.currentTarget;
-      button.disabled = true;
-      errorText.textContent = "";
-      try {
-        await run();
-      } catch (error) {
-        errorText.textContent = error.cause?.message ?? error.message;
-      } finally {
-        button.disabled = false;
-      }
-    } }, label);
-  }
-
-  function show() {
-    const { status, error, result } = request ?? {};
-    const { adopted, at } = counterAdopted({ request, plan, amendments });
-    const waiting = status === "queued" || status === "running";
-    const refresh = (waiting || loadError) && action("重新整理", async () => {
-      request = await ctx.db.latestCounterView(plan.id);
-      loadError = "";
-      show();
-    });
-    const ask = (status === "error" || (!status && !loadError && active)) &&
-      action(status === "error" ? "重新請 AI 寫" : "請 AI 寫最強的看空理由", askAgain);
-    const adopt = active && !adopted && status === "done" && result?.counter_view && (
-      isPlanValueBlank(plan.counter_view)
-        ? action("補填到第 9 欄", () => saveSupplement(root, ctx, plan.id, { counter_view: result.counter_view }))
-        : h("button", { class: "btn", type: "button", onclick: () => prefillCounterView(result.counter_view) },
-          "追加為修訂")
-    );
-    statusText.textContent = waiting ? "AI 反方觀點處理中" : "";
-    errorText.textContent = loadError || (status === "error" ? error || "反方觀點處理失敗" : "");
-    const view = status === "done" && result?.counter_view && (
-      adopted ? adoptedCounterView(result, { at, retry: active && action("重新請 AI 寫", askAgain) })
-        : counterViewResult(result, adopt)
-    );
-    const children = [
-      statusText,
-      (refresh || ask) && h("div", { class: "counter-actions" }, refresh, ask),
-      view,
-      errorText,
-    ];
-    panel.replaceChildren(...children.filter(Boolean));
-  }
-
-  async function askAgain() {
-    request = await ctx.db.requestCounterView(plan.id);
-    show();
-  }
-
-  show();
-  return panel;
 }
 
 function heading(plan, status) {
@@ -301,9 +236,6 @@ function amendmentForm(root, ctx, plan) {
 
   return {
     form,
-    prefillCounterView(value) {
-      prefill("counter_view", value, "採用 AI 反方觀點");
-    },
     prefillPlanCheck(key) {
       prefill(key, plan[key], "依 AI 體檢改寫");
     },
@@ -392,26 +324,29 @@ export async function render(root, ctx) {
   const related = [
     db.listOpenAlerts(original.id),
     db.listEvidence(original.id),
-    db.latestCounterView(original.id).then((request) => ({ request }),
-      (error) => ({ error: error.cause?.message ?? error.message })),
   ];
   if (original.status === "draft") {
-    const [alerts, evidence, latestCounter] = await Promise.all(related);
+    const [alerts, evidence] = await Promise.all(related);
     if (!root.isConnected) return;
     root.replaceChildren(heading(original, "草稿"),
       ...actionableAlerts(alerts).map(alertCard),
       h("a", { class: "btn pri", href: `#plan-new/${original.id}` }, "繼續編輯"),
-      planContent(original, [], { counter: counterPanel(root, ctx, original, latestCounter) }),
+      planContent(original, []),
       evidenceLog(original, evidence),
     );
     return;
   }
 
   const today = todayStr();
-  const [amendments, trades, alerts, evidence, latestCounter] = await Promise.all([
+  const [amendments, trades, alerts, evidence, counterViews] = await Promise.all([
     db.listAmendments(original.id), db.listTrades(original.id),
     ...related,
+    db.aiCounterViews(original.id).catch(() => null),
   ]);
+  if (counterViews?.length && !counterViews.some((view) => view.changed)) {
+    const lastChange = await db.latestChangedCounterView(original.id).catch(() => null);
+    if (lastChange?.view_date < counterViews[0].view_date) counterViews.push(lastChange);
+  }
   const held = buildPositions(trades, today).get(original.id);
   let review = original.status === "closed" ? await db.getExitReview(original.id) : null;
   let status = original.status;
@@ -486,9 +421,9 @@ export async function render(root, ctx) {
     planContent(plan, amendments, {
       missing,
       supplement: supplement?.form,
-      counter: counterPanel(root, ctx, { ...original, status }, latestCounter, amendments, amendment?.prefillCounterView),
       check: check?.panel ?? (latestClosedCheck?.result && planCheckResult(latestClosedCheck.result)),
     }),
+    counterViews && aiCounterViewCard(counterViews, { active: status === "active" }),
     checks && planChecksCard(checks),
     h("section", { class: "card" },
       h("h2", null, "修訂紀錄"),
@@ -514,5 +449,6 @@ export async function render(root, ctx) {
       h("p", null, `單筆復盤：${review.status === "done" ? "已完成" : "草稿"}，到期日 ${fmtDate(review.due_date)}`),
     ) : "",
   );
+  if (counterViews?.length) void db.markCounterViewsSeen(plan.id).catch(() => {});
   if (check) void check.refresh();
 }

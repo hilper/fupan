@@ -54,6 +54,15 @@ function aiCard(evidence) {
   );
 }
 
+function counterUpdateCard(update) {
+  const name = [update.plans?.symbol, update.plans?.name].filter(Boolean).join("／");
+  return h("a", { class: "card action-card ai-counter-update", href: `#plan/${update.plan_id}` },
+    h("p", null, h("strong", null, name), ` · ${shortDate(update.view_date, false)} · ${update.change_note}`,
+      update.invalidation_status === "triggered" && h("span", { class: "warn" }, " · 失效條件可能已成立"),
+    ),
+  );
+}
+
 function reviewCard(review, today) {
   return h("a", { class: "card review-action", href: `#exit-review/${review.id}` },
     h("span", { class: "holding-name" },
@@ -74,20 +83,26 @@ export async function render(root, ctx) {
   const now = new Date();
   const today = fmtDate(now);
   ctx.setSubtitle(`${now.getMonth() + 1}月${now.getDate()}日 ${weekday.format(now)}`);
-  const [alerts, pendingEvidence, reviews, nav, jobRuns] = await Promise.all([
+  const [alerts, pendingEvidence, reviews, nav, jobRuns, counterUpdates] = await Promise.all([
     ctx.db.listOpenAlerts(), ctx.db.listPendingAiEvidence(), ctx.db.listDraftExitReviews(),
     ctx.db.latestNav(), ctx.db.latestJobRuns(),
+    ctx.db.unseenCounterUpdates().catch(() => []),
   ]);
   if (!root.isConnected) return;
 
   const actionable = actionableAlerts(alerts);
   const evidence = pendingEvidence.filter((row) => row.info_type !== "rumor");
-  const count = actionable.length + evidence.length + reviews.length;
+  const updatesByPlan = new Map();
+  for (const update of counterUpdates) {
+    if (!updatesByPlan.has(update.plan_id)) updatesByPlan.set(update.plan_id, update);
+  }
+  const count = actionable.length + evidence.length + reviews.length + updatesByPlan.size;
   root.replaceChildren(...[
     h("p", { class: "lbl today-count" }, `今日待處理 ${count} 件`),
     ...alerts.filter((alert) => alert.kind === "stale").map((alert) => staleNotice(alert, ctx)),
     performanceCard(nav),
     actionSection("條件已觸發 · 今天要做決定", actionable.map(alertCard)),
+    actionSection("AI 反方觀點有更新", Array.from(updatesByPlan.values(), counterUpdateCard)),
     actionSection("AI 信息評估 · 等你確認", evidence.map(aiCard)),
     actionSection("待寫單筆復盤", reviews.map((review) => reviewCard(review, today))),
     count === 0 && h("p", { class: "empty" }, "今天沒有要處理的事。"),

@@ -146,6 +146,29 @@ export function createDb(client) {
         .limit(1).maybeSingle());
     },
 
+    aiCounterViews(planId, limit = 30) {
+      return readResult("讀取 AI 反方觀點失敗", () => client.from("ai_counter_views")
+        .select("*").eq("plan_id", planId).order("view_date", { ascending: false }).limit(limit));
+    },
+
+    latestChangedCounterView(planId) {
+      return readResult("讀取最近一次 AI 反方觀點變化失敗", () => client.from("ai_counter_views")
+        .select("*").eq("plan_id", planId).eq("changed", true)
+        .order("view_date", { ascending: false }).limit(1).maybeSingle());
+    },
+
+    unseenCounterUpdates() {
+      return readRows("讀取 AI 反方觀點更新失敗", () => client.from("ai_counter_views")
+        .select("id,plan_id,view_date,change_note,invalidation_status,plans(symbol,name)")
+        .eq("changed", true).is("seen_at", null)
+        .order("view_date", { ascending: false }).order("id", { ascending: false }));
+    },
+
+    markCounterViewsSeen(planId) {
+      return readResult("標記 AI 反方觀點已讀失敗", () => client.from("ai_counter_views")
+        .update({ seen_at: new Date().toISOString() }).eq("plan_id", planId).is("seen_at", null));
+    },
+
     requestPlanCheck(planId) {
       return readResult("送出 AI 體檢請求失敗", () => client.from("ai_requests")
         .insert({ kind: "plan_check", plan_id: planId }).select(counterViewColumns).single());

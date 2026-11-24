@@ -561,6 +561,43 @@ dialog::backdrop {
   background: #f0efec;
 }
 
+.ai-counter-card, .ai-counter-update {
+  overflow-wrap: anywhere;
+}
+
+.ai-counter-sources {
+  margin: 0;
+  padding-inline-start: 18px;
+}
+
+.ai-counter-sources a {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.ai-counter-history {
+  border-top: 1px solid var(--rule);
+  padding-top: 8px;
+}
+
+.ai-counter-history summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+
+.ai-counter-history > details {
+  margin-top: 8px;
+  padding-inline-start: 8px;
+}
+
+.ai-counter-history > details > :not(summary) {
+  margin-top: 6px;
+}
+
+.ai-counter-update .warn {
+  font-size: 12px;
+}
+
 .plan-check-panel, .plan-check-result, .plan-check-issues,
 .plan-check-issues > li {
   display: grid;

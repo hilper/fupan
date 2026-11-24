@@ -334,14 +334,69 @@ export function adoptedCounterView(result, { at, retry } = {}) {
   );
 }
 
-export function counterViewResult(result, action) {
+export function counterViewResult(result, action, title = "AI 的看空理由") {
   return h("div", { class: "counter-result" },
-    h("strong", null, "AI 的看空理由"),
+    h("strong", null, title),
     h("p", { class: "plan-read-text" }, result.counter_view),
     result.invalidation_checkable === false && h("p", { class: "warn plan-read-text" },
       `失效條件不易驗證：${result.invalidation_note}`),
     h("p", { class: "lbl" }, "AI 只是幫你找反方，是否同意由你決定"),
     action,
+  );
+}
+
+const invalidationStatusText = {
+  triggered: "失效條件可能已成立",
+  not_triggered: "失效條件尚未成立",
+  unclear: "失效條件無法判斷",
+};
+
+function aiCounterViewBody(view) {
+  const status = invalidationStatusText[view.invalidation_status];
+  const sources = view.sources.flatMap(({ title, url, published }) => {
+    const href = safeHttpUrl(url);
+    if (!href) return [];
+    return h("li", null,
+      h("a", { href, target: "_blank", rel: "noopener noreferrer" }, title),
+      published && ` · ${published}`,
+    );
+  });
+  return [
+    h("p", { class: "plan-read-text" }, view.counter_view),
+    h("p", { class: view.invalidation_status === "triggered" ? "warn" : "lbl" },
+      view.invalidation_note ? `${status}：${view.invalidation_note}` : status),
+    sources.length > 0 && h("ul", { class: "lbl ai-counter-sources", "aria-label": "來源" }, sources),
+  ];
+}
+
+export function aiCounterViewCard(views, { active }) {
+  const [latest, ...older] = views;
+  if (!latest && !active) return null;
+  const history = older.filter((view) => view.changed);
+  const lastChange = history[0];
+  return h("section", { class: "card ai-counter-card" },
+    h("div", { class: "record-head" },
+      h("h2", null, "AI 反方觀點"),
+      h("span", { class: "lbl" }, "第三方 · 每個交易日更新"),
+    ),
+    latest ? [
+      h("p", { class: "lbl" },
+        h("time", { datetime: latest.view_date }, `${shortDate(latest.view_date, false)} 更新`)),
+      latest.changed
+        ? h("p", { class: "lbl" }, latest.change_note)
+        : h("p", { class: "lbl" }, lastChange
+          ? `今日無新變化，沿用 ${shortDate(lastChange.view_date, false)} 內容`
+          : "今日無新變化，沿用前次內容"),
+      aiCounterViewBody(latest),
+      history.length > 0 && h("details", { class: "ai-counter-history" },
+        h("summary", null, `過去紀錄（${history.length}）`),
+        history.map((view) => h("details", null,
+          h("summary", null, `${shortDate(view.view_date, false)} · ${view.change_note}`),
+          aiCounterViewBody(view),
+        )),
+      ),
+    ] : h("p", { class: "lbl" }, "鎖定後 Mac 會自動產生，約 1–2 分鐘；之後每個交易日收盤後更新"),
+    h("p", { class: "lbl" }, "AI 依公開資料檢索整理，可能有誤，請點來源查證；不是買賣建議"),
   );
 }
 
@@ -523,9 +578,11 @@ export const error_tags = [
   { value: "emotion", label: "情緒錯誤", example: "賠了想打回來、連賺後膨脹" },
 ];
 
-export function shortDate(value) {
+export function shortDate(value, padded = true) {
   const date = fmtDate(value);
-  return date === "—" ? date : date.slice(5).replace("-", "/");
+  if (date === "—") return date;
+  const [month, day] = date.slice(5).split("-");
+  return padded ? `${month}/${day}` : `${Number(month)}/${Number(day)}`;
 }
 
 export function signedPct(value) {

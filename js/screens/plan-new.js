@@ -1,7 +1,7 @@
 import { addDays, planChecks, planLossEstimate, symbolInfo } from "../calc.js";
 import { fmtPct, todayStr } from "../format.js";
 import {
-  adoptedCounterView, confidenceField, confirmDialog, counterAdopted, counterViewResult,
+  confidenceField, confirmDialog, counterViewResult,
   field, h, isPlanValueBlank, missingPlan, planChecksCard,
   planCheckPanel, planFields, planInput, planSections, planTimestamp, readPlanInput, seg,
   setFieldError, supplementPlanFields,
@@ -39,12 +39,9 @@ export async function render(root, ctx) {
   let locking = false;
   let reviewedDate = false;
   let readyToCreate = false;
-  let counterInput;
   let counterRequest;
   let counterBusy = false;
   let counterError = "";
-  let shownCounterResult;
-  let shownCounterAdopted = false;
   let rulePrice = null;
   let priceSymbol;
   let priceRequest = 0;
@@ -106,37 +103,17 @@ export async function render(root, ctx) {
     updateCounterButtons();
     const { status, error } = counterRequest ?? {};
     counterStatus.textContent = counterError || (
-      waitingForCounter() ? "已送出，Mac 約 1 分鐘內處理，可以先鎖定，結果之後在計劃卡上看"
+      waitingForCounter() ? "已送出，Mac 約 1 分鐘內處理，可在鎖定前重新整理查看結果"
         : status === "error" ? error || "反方觀點處理失敗" : ""
     );
     const hasError = Boolean(counterError || status === "error");
     counterStatus.classList.toggle("form-status", !hasError);
     counterStatus.classList.toggle("form-error", hasError);
-    showCounterResult();
-  }
-
-  function showCounterResult() {
-    const { status, result } = counterRequest ?? {};
-    const view = status === "done" && result?.counter_view;
-    const { adopted } = counterAdopted({
-      request: counterRequest, plan: { counter_view: counterInput.value },
-    });
-    const visibleResult = view ? result : null;
-    if (shownCounterResult === visibleResult && shownCounterAdopted === adopted) return;
-    shownCounterResult = visibleResult;
-    shownCounterAdopted = adopted;
-
-    counterResult.hidden = !view;
-    if (!view) {
-      counterResult.replaceChildren();
-      return;
-    }
-    const card = adopted ? adoptedCounterView(result)
-      : counterViewResult(result, h("button", { class: "btn", type: "button", onclick: () => {
-        counterInput.value = view;
-        counterInput.dispatchEvent(new Event("input", { bubbles: true }));
-      } }, "採用到第 9 欄"));
-    counterResult.replaceChildren(card);
+    const result = status === "done" ? counterRequest.result : null;
+    counterResult.hidden = !result?.counter_view;
+    counterResult.replaceChildren(...(counterResult.hidden ? [] : [
+      counterViewResult(result, null, "AI 反方觀點（參考，鎖定後改為每日自動更新）"),
+    ]));
   }
 
   async function loadCounterView() {
@@ -255,7 +232,6 @@ export async function render(root, ctx) {
     const confidence = key === "confidence" ? confidenceField(values[key]) : null;
     const input = confidence?.input ?? planInput(definition, values[key]);
     editors.set(key, input);
-    if (key === "counter_view") counterInput = input;
     const wrapper = confidence?.wrapper ?? field(definition.label, input, definition.optional ? "可留空" : null);
 
     function read(commit) {
@@ -265,7 +241,6 @@ export async function render(root, ctx) {
         reviewedDate = false;
         dateSeen.checked = false;
       }
-      if (key === "counter_view") showCounterResult();
       refresh();
       if (commit) void flush();
       else schedule();
@@ -286,7 +261,7 @@ export async function render(root, ctx) {
     let content = [...fields.values()];
     if (index === 2) content = [pair(keys)];
     if (index === 5) content = [pair(keys.slice(0, 2)), pair(keys.slice(2))];
-    if (index === 8) content.unshift(counterPanel);
+    if (index === 8) content.push(counterPanel);
     sections.push({ keys, state, number });
     return h("section", { class: "card plan-step-card" },
       h("header", { class: "plan-step-heading" }, number, h("h2", null, title), state),
