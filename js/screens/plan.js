@@ -419,7 +419,10 @@ export async function render(root, ctx) {
     heading(plan, statusLabel[status]),
     ...actionableAlerts(alerts).map(alertCard),
     positionCard(plan, held, position, quote),
-    status === "active" ? h("a", { class: "btn pri", href: `#trade/${plan.id}` }, "記一筆成交") : "",
+    status === "active" && h("div", { class: "grid-two" },
+      h("a", { class: "btn pri", href: `#trade/${plan.id}` }, "記一筆成交"),
+      h("a", { class: "btn", href: `#import/${plan.id}` }, "從截圖匯入"),
+    ),
     planContent(plan, amendments, {
       missing,
       supplement: supplement?.form,

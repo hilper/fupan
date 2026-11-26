@@ -6,6 +6,7 @@ import * as holdings from "./screens/holdings.js";
 import * as plan from "./screens/plan.js";
 import * as planNew from "./screens/plan-new.js";
 import * as trade from "./screens/trade.js";
+import * as importScreen from "./screens/import.js";
 import * as today from "./screens/today.js";
 import * as alert from "./screens/alert.js";
 import * as evidence from "./screens/evidence.js";
@@ -33,6 +34,7 @@ routes.set("exit-review", { title: "單筆復盤", screen: exitReview, hasId: tr
 routes.set("plan", { title: "計劃卡", screen: plan, hasId: true });
 routes.set("plan-new", { title: "新計劃卡", screen: planNew, hasId: true, optionalId: true });
 routes.set("trade", { title: "記一筆成交", screen: trade, hasId: true });
+routes.set("import", { title: "從截圖匯入", screen: importScreen, hasId: true });
 routes.set("alert", { title: "處理提醒", screen: alert, hasId: true, todayItem: "提醒", subtitle: true });
 routes.set("evidence", { title: "證據", screen: evidence, hasId: true, todayItem: "證據", subtitle: true });
 routes.set("evidence-new", {
@@ -138,7 +140,7 @@ async function renderRoute() {
   const itemBack = itemBackKey ? history.state[itemBackKey] : null;
   let backTo = prefix === "settings" ? history.state.settingsBack : lastTab ?? "#today";
   if (invalid || prefix === "plan-new" && validId) backTo = "#holdings";
-  if (prefix === "trade" && !invalid) backTo = `#plan/${id}`;
+  if ((prefix === "trade" || prefix === "import") && !invalid) backTo = `#plan/${id}`;
   if (todayItem) backTo = invalid ? "#today" : itemBack.sourcePlan ?? itemBack.tab;
   if (isExitReview) backTo = itemBack.sourcePlan ?? itemBack.tab;
   const back = !isTab && h("a", { class: "back", href: backTo }, "‹ 返回");

@@ -668,6 +668,30 @@ dialog::backdrop {
   accent-color: var(--accent);
 }
 
+.import-link {
+  align-self: flex-start;
+  padding-block: 10px;
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.import-subtitle {
+  margin-top: -10px;
+}
+
+.import-section {
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.import-row-warning {
+  border-color: var(--warn);
+}
+
+.import-warning {
+  font-size: 13px;
+}
+
 .field input[type="range"] {
   padding-inline: 0;
   accent-color: var(--accent);

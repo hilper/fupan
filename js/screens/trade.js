@@ -85,7 +85,10 @@ export async function render(root, ctx) {
       ),
     ),
   );
-  root.append(h("form", { class: "form-stack", onsubmit: (event) => event.preventDefault() }, controls, errorText));
+  root.append(
+    h("a", { class: "import-link", href: `#import/${plan.id}` }, "有券商截圖？從截圖匯入"),
+    h("form", { class: "form-stack", onsubmit: (event) => event.preventDefault() }, controls, errorText),
+  );
 
   function readValues() {
     const quantityText = quantity.value.trim();
