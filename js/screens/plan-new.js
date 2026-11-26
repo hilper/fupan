@@ -3,7 +3,7 @@ import { fmtPct, todayStr } from "../format.js";
 import {
   confidenceField, confirmDialog,
   field, fieldSourceChip, fieldSources, h, isPlanValueBlank, missingPlan, planChecksCard, planEditTime,
-  planCheckPanel, planFields, planInput, planSections, planTimestamp, readPlanInput, seg,
+  numberCheckNote, officialFactsTable, planCheckPanel, planFields, planInput, planSections, planTimestamp, readPlanInput, seg,
   setFieldError, supplementPlanFields,
 } from "../ui.js";
 import { loadPortfolio } from "./holdings.js";
@@ -70,9 +70,10 @@ export async function render(root, ctx) {
   const loss = h("p", { class: "plan-calculation" });
   const draftStatus = h("p", { role: "status" });
   const draftNote = h("small", { class: "lbl", hidden: true },
-    "依 AI 知識與搜尋到的公開資料整理，可能有誤；每一欄都可修改。");
+    "財報數字已與東方財富官方數據逐一核對，標 ⚠ 的請自行查證；每一欄都可修改。");
   const draftRetry = h("button", { type: "button", class: "btn", onclick: startDraftRequest }, "重試");
   const draftPanel = h("div", { class: "draft-ai-status", hidden: true }, draftStatus, draftNote, draftRetry);
+  const draftFacts = h("div", { hidden: true });
   const ruleCard = h("div");
   const missing = h("p", { class: "lbl" });
   const lock = h("button", { class: "btn pri", type: "submit" }, "鎖定計劃卡");
@@ -95,12 +96,14 @@ export async function render(root, ctx) {
   });
 
   function updateDraftStatus() {
-    const { status, error, done_at: doneAt } = draftRequest ?? {};
+    const { status, error, done_at: doneAt, result } = draftRequest ?? {};
     const failure = draftError || (status === "error" ? error || "處理失敗" : "");
     const done = !failure && status === "done";
     draftPanel.hidden = !failure && !status && !draftBusy;
     draftRetry.hidden = !failure || draftBusy;
-    draftNote.hidden = !done;
+    draftNote.hidden = !done || !result?.number_check;
+    draftFacts.hidden = !done || !result?.facts;
+    if (!draftFacts.hidden) draftFacts.replaceChildren(officialFactsTable(result.facts));
     draftStatus.className = failure ? "form-error" : "form-status";
     draftStatus.textContent = failure ? `AI 起草失敗：${failure}`
       : done ? `AI 起草完成 · ${planEditTime(doneAt)} · DeepSeek` : "AI 起草中…";
@@ -115,25 +118,39 @@ export async function render(root, ctx) {
         originals.set(row.field, row);
       }
     }
-    for (const [key, { chip, original, originalValue, confirm }] of provenance) {
+    for (const [key, entry] of provenance) {
+      const { chip, original, originalValue, confirm } = entry;
       const source = sources.get(key);
       const badge = fieldSourceChip(source);
       chip.replaceChildren(...(badge ? [badge] : []));
       chip.hidden = !badge;
       const edit = originals.get(key);
+      const result = draftResults.get(edit?.request_id);
+      entry.result = result;
       if (original) {
         original.hidden = !edit;
         if (edit) {
-          const result = draftResults.get(edit.request_id);
           originalValue.textContent = String(result?.[key] ?? edit.new_value);
           if (key === "stop_price" && result?.stop_basis) {
             originalValue.textContent += `\n依據：${result.stop_basis}`;
           }
         }
       }
+      updateNumberNote(key);
       if (confirm) confirm.hidden = source !== "ai";
     }
     refresh();
+  }
+
+  function updateNumberNote(key) {
+    const { warning, result } = provenance.get(key) ?? {};
+    if (!warning) return;
+    const input = editors.get(key);
+    const note = key === "stop_price"
+      ? numberCheckNote(result?.number_check, "stop_basis")
+      : numberCheckNote(result?.number_check, key, input.value);
+    warning.replaceChildren(...(note ? [note] : []));
+    warning.hidden = !note;
   }
 
   function scheduleDraftPoll() {
@@ -198,6 +215,7 @@ export async function render(root, ctx) {
 
   function sourceLabel(key, label) {
     const chip = h("span", { hidden: true });
+    const warning = h("div", { hidden: true });
     const originalValue = h("p", { class: "plan-read-text" });
     const original = h("details", { class: "plan-draft-original", hidden: true },
       h("summary", null, "看 AI 原稿"), originalValue);
@@ -219,11 +237,11 @@ export async function render(root, ctx) {
         }
       },
     }, key === "stop_price" ? "確認此價" : "確認") : null;
-    provenance.set(key, { chip, original, originalValue, confirm });
+    provenance.set(key, { chip, original, originalValue, confirm, warning });
     const heading = h("div", { class: "record-meta plan-field-heading" }, chip, confirm);
     label.replaceWith(heading);
     heading.prepend(label);
-    return original;
+    return [warning, original];
   }
 
   function record(key, value) {
@@ -260,7 +278,7 @@ export async function render(root, ctx) {
     const wrapper = field(label, input, backfill && key === "sector" ? "可留空" : null);
     if (key === "sector") {
       editors.set(key, input);
-      input.after(sourceLabel(key, wrapper.querySelector("label")));
+      input.after(...sourceLabel(key, wrapper.querySelector("label")));
     }
 
     function read(commit) {
@@ -320,11 +338,12 @@ export async function render(root, ctx) {
     const optional = definition.optional || backfill && ["planned_weight_pct", "next_review_date"].includes(key);
     const hint = backfill && key === "next_review_date" ? "留空時，鎖定後預設為 30 天後" : optional ? "可留空" : null;
     const wrapper = confidence?.wrapper ?? field(definition.label, input, hint);
-    input.after(sourceLabel(key, wrapper.querySelector("label")));
+    input.after(...sourceLabel(key, wrapper.querySelector("label")));
 
     function read(commit) {
       const { value, error } = readPlanInput(definition, input);
       updateField(key, wrapper, input, value, error);
+      updateNumberNote(key);
       if (key === "next_review_date") {
         reviewedDate = false;
         dateSeen.checked = false;
@@ -402,7 +421,7 @@ export async function render(root, ctx) {
   }
   root.append(h("div", { class: "draft-summary" },
     completion,
-    saveStatus, saveError, retry, draftPanel,
+    saveStatus, saveError, retry, draftPanel, draftFacts,
   ), h("form", { onsubmit: lockDraft, novalidate: true }, formContent));
   renderDraftNav();
   refresh();

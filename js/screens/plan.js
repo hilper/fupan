@@ -3,7 +3,7 @@ import { fmtDate, fmtMoney, fmtPct, todayStr } from "../format.js";
 import {
   aiCounterViewBlock, allowedPlanAmendments, amendablePlanFields, confidenceField,
   detailsValue, displayPlanValue, field, fieldSourceChip, fieldSources, h, isPlanValueBlank, missingPlan,
-  missingSupplementFieldsFor, planCheckPanel, planCheckResult, planChecksCard, planFields,
+  missingSupplementFieldsFor, numberCheckNote, planCheckPanel, planCheckResult, planChecksCard, planFields,
   planEditTime, planInput, planSections, planTimestamp, pnlColor, readPlanInput, setFieldError,
 } from "../ui.js";
 import { actionableAlerts, alertCard } from "./alert.js";
@@ -48,7 +48,7 @@ export async function finalizeClose(db, plan, today) {
   return review;
 }
 
-function planContent(plan, sources, { editCount = 0, missing = [], supplement, counterViewBlock, check } = {}) {
+function planContent(plan, sources, { editCount = 0, missing = [], supplement, counterViewBlock, check, numberCheck } = {}) {
   const draft = plan.status === "draft";
   const sections = planSections.map(([title, keys], index) => {
     return h("section", { class: "plan-read-section" },
@@ -56,8 +56,11 @@ function planContent(plan, sources, { editCount = 0, missing = [], supplement, c
       keys.map((key) => {
         const blank = isPlanValueBlank(plan[key]);
         const label = key === "counter_view" && !sources.has(key) ? "我寫的" : planFields[key].label;
+        const source = sources.get(key);
+        const note = (source === "ai" || source === "ai_edited")
+          ? numberCheckNote(numberCheck, key, String(plan[key] ?? "")) : null;
         return detailsValue(label, blank ? "待補" : displayPlanValue(key, plan[key]),
-          blank ? "plan-pending" : "", plan.amended?.has(key), sources.get(key));
+          blank ? "plan-pending" : "", plan.amended?.has(key), source, note);
       }),
       index === 2 && plan.expected_up_pct != null && Number(plan.expected_down_pct) > 0 &&
         h("p", { class: "lbl" }, `賺賠比 ${(plan.expected_up_pct / plan.expected_down_pct).toFixed(1)} : 1`),
@@ -384,14 +387,15 @@ export async function render(root, ctx) {
     db.listEvidence(original.id),
   ];
   const editsRequest = db.listPlanEdits(original.id);
+  const draftRequest = db.latestPlanDraft(original.id, null, { doneOnly: true }).catch(() => null);
   if (original.status === "draft") {
-    const [alerts, evidence, edits] = await Promise.all([...related, editsRequest]);
+    const [alerts, evidence, edits, draft] = await Promise.all([...related, editsRequest, draftRequest]);
     const sources = fieldSources(edits);
     if (!root.isConnected) return;
     root.replaceChildren(heading(original, "草稿", sources),
       ...actionableAlerts(alerts).map(alertCard),
       h("a", { class: "btn pri", href: `#plan-new/${original.id}` }, "繼續編輯"),
-      planContent(original, sources),
+      planContent(original, sources, { numberCheck: draft?.result?.number_check }),
       planEditHistory(edits, []),
       evidenceLog(original, evidence),
     );
@@ -399,10 +403,11 @@ export async function render(root, ctx) {
   }
 
   const today = todayStr();
-  const [amendments, trades, alerts, evidence, edits, counterViews] = await Promise.all([
+  const [amendments, trades, alerts, evidence, edits, counterViews, draft] = await Promise.all([
     db.listAmendments(original.id), db.listTrades(original.id),
     ...related, editsRequest,
     db.aiCounterViews(original.id).catch(() => null),
+    draftRequest,
   ]);
   if (counterViews?.length && !counterViews.some((view) => view.changed)) {
     const lastChange = await db.latestChangedCounterView(original.id).catch(() => null);
@@ -488,6 +493,7 @@ export async function render(root, ctx) {
     ),
     planContent(plan, sources, {
       editCount, missing,
+      numberCheck: draft?.result?.number_check,
       supplement: supplement?.form,
       counterViewBlock: counterViews && aiCounterViewBlock(counterViews, { active: status === "active" }),
       check: check?.panel ?? (latestClosedCheck?.result && planCheckResult(latestClosedCheck.result)),

@@ -17,6 +17,8 @@ const settingsDefaults = {
 const settingsColumns = Object.keys(settingsDefaults).join(",");
 const alertColumns = "*,plans(name,symbol,market,stop_price)";
 const planCheckColumns = "status,error,result,done_at";
+const counterViewColumns = "id,user_id,plan_id,view_date,counter_view,changed,change_note,invalidation_status," +
+  "invalidation_note,sources,seen_at,created_at,facts,number_check";
 const exitReviewEditableColumns = [
   "thesis_verdict", "pnl_sources", "next_time", "is_repeat", "decision_quality", "error_tags",
   "return_pct", "bench_return_pct", "excess_pct",
@@ -152,12 +154,14 @@ export function createDb(client) {
       return request;
     },
 
-    latestPlanDraft(planId, requestId) {
+    latestPlanDraft(planId, requestId, { doneOnly = false } = {}) {
       return readResult("讀取 AI 起草請求失敗", () => {
         const query = client.from("ai_requests").select("id,status,error,result,done_at")
           .eq("kind", "plan_draft").eq("plan_id", planId);
+        if (doneOnly) query.eq("status", "done");
         return (requestId == null ? query : query.eq("id", requestId))
-          .order("created_at", { ascending: false, nullsFirst: false }).order("id", { ascending: false })
+          .order(doneOnly ? "done_at" : "created_at", { ascending: false, nullsFirst: false })
+          .order("id", { ascending: false })
           .limit(1).maybeSingle();
       });
     },
@@ -174,12 +178,12 @@ export function createDb(client) {
 
     aiCounterViews(planId, limit = 30) {
       return readResult("讀取 AI 反方觀點失敗", () => client.from("ai_counter_views")
-        .select("*").eq("plan_id", planId).order("view_date", { ascending: false }).limit(limit));
+        .select(counterViewColumns).eq("plan_id", planId).order("view_date", { ascending: false }).limit(limit));
     },
 
     latestChangedCounterView(planId) {
       return readResult("讀取最近一次 AI 反方觀點變化失敗", () => client.from("ai_counter_views")
-        .select("*").eq("plan_id", planId).eq("changed", true)
+        .select(counterViewColumns).eq("plan_id", planId).eq("changed", true)
         .order("view_date", { ascending: false }).limit(1).maybeSingle());
     },
 

@@ -324,6 +324,40 @@ export function fieldSourceChip(source) {
   return labels[source] ? h("span", { class: `chip plan-source ${source}` }, labels[source]) : null;
 }
 
+export function numberCheckNote(check, field, currentText) {
+  const threshold = /(?:低於|高於|超過|不足|跌破|突破|站上|站穩|大於|小於|至少|達到|達|逾|未達|降至|升至|回到|≥|≤|>|<)$/;
+  const numbers = (check?.unverified ?? [])
+    .filter(({ field: name, text }) => name === field && (currentText === undefined || currentText.includes(text)))
+    .filter(({ context, text }) => {
+      const position = typeof context === "string" ? context.indexOf(text) : -1;
+      return position < 0 || !threshold.test(context.slice(0, position).trimEnd());
+    })
+    .map(({ text }) => text);
+  return numbers.length
+    ? h("p", { class: "warn number-check-note" }, `⚠ 以下數字無法與官方數據核對：${[...new Set(numbers)].join("、")}`)
+    : null;
+}
+
+export function officialFactsTable(facts) {
+  const rows = facts?.financials ?? [];
+  const columns = ["期別", "營收", "年增", "歸母淨利", "年增", "扣非", "年增", "毛利率", "ROE"];
+  const amount = (value) => Number.isFinite(value) ? `${fmtMoney(value / 1e8)} 億` : "—";
+  return h("details", { class: "official-facts" },
+    h("summary", null, "官方財報數據（東方財富）"),
+    rows.length ? h("div", {
+      class: "official-facts-scroll", tabindex: "0", role: "region", "aria-label": "官方財報明細",
+    }, h("table", null,
+      h("thead", null, h("tr", null, columns.map((label) => h("th", { scope: "col" }, label)))),
+      h("tbody", null, rows.slice(0, 4).map((row) => h("tr", null,
+        h("th", { scope: "row" }, row.period?.replace(/报/g, "報") || row.report_date || "—"),
+        [amount(row.revenue), fmtPct(row.revenue_yoy), amount(row.net_profit), fmtPct(row.net_profit_yoy),
+          amount(row.deducted_profit), fmtPct(row.deducted_profit_yoy), fmtPct(row.gross_margin), fmtPct(row.roe)]
+          .map((value) => h("td", null, value)),
+      ))),
+    )) : h("p", { class: "lbl" }, "港股／ETF 暫無官方財報數據可核對"),
+  );
+}
+
 export function counterAdopted({ request, plan, amendments = [] }) {
   const view = request?.result?.counter_view;
   if (request?.status !== "done" || !view) return { adopted: false, at: null };
@@ -368,8 +402,11 @@ function aiCounterViewBody(view) {
   });
   return [
     h("p", { class: "plan-read-text" }, view.counter_view),
+    numberCheckNote(view.number_check, "counter_view"),
     h("p", { class: view.invalidation_status === "triggered" ? "warn" : "lbl" },
       view.invalidation_note ? `${status}：${view.invalidation_note}` : status),
+    numberCheckNote(view.number_check, "invalidation_note", view.invalidation_note ?? ""),
+    officialFactsTable(view.facts),
     sources.length > 0 && h("ul", { class: "lbl ai-counter-sources", "aria-label": "來源" }, sources),
   ];
 }
@@ -392,11 +429,13 @@ export function aiCounterViewBlock(views, { active }) {
         : h("p", { class: "lbl" }, lastChange
           ? `今日無新變化，沿用 ${shortDate(lastChange.view_date, false)} 內容`
           : "今日無新變化，沿用前次內容"),
+      latest.changed && numberCheckNote(latest.number_check, "change_note", latest.change_note ?? ""),
       aiCounterViewBody(latest),
       history.length > 0 && h("details", { class: "ai-counter-history" },
         h("summary", null, `過去紀錄（${history.length}）`),
         history.map((view) => h("details", null,
           h("summary", null, `${shortDate(view.view_date, false)} · ${view.change_note}`),
+          numberCheckNote(view.number_check, "change_note", view.change_note ?? ""),
           aiCounterViewBody(view),
         )),
       ),
@@ -525,11 +564,12 @@ export function setFieldError(wrapper, input, message = "") {
   else input.removeAttribute("aria-invalid");
 }
 
-export function detailsValue(label, value, className = "", badge = false, source) {
+export function detailsValue(label, value, className = "", badge = false, source, note) {
   return h("div", { class: "details-value" },
     h("div", { class: "record-meta" }, h("span", { class: "lbl" }, label),
       badge && h("span", { class: "chip" }, "已修訂"), fieldSourceChip(source)),
     h("p", { class: className }, value ?? "—"),
+    note,
   );
 }
 

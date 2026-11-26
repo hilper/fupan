@@ -523,6 +523,43 @@ dialog::backdrop {
   margin-top: 4px;
 }
 
+.number-check-note {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.official-facts {
+  min-inline-size: 0;
+  margin-block: 6px;
+}
+
+.official-facts > summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+
+.official-facts-scroll {
+  contain: inline-size;
+  overflow-x: auto;
+  margin-top: 6px;
+}
+
+.official-facts table {
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.official-facts th, .official-facts td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--rule);
+  text-align: end;
+  white-space: nowrap;
+}
+
+.official-facts th:first-child {
+  text-align: start;
+}
+
 .ai-counter-sources {
   margin: 0;
   padding-inline-start: 18px;
