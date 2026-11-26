@@ -93,10 +93,11 @@ export async function render(root, ctx) {
   const now = new Date();
   const today = fmtDate(now);
   ctx.setSubtitle(`${now.getMonth() + 1}月${now.getDate()}日 ${weekday.format(now)}`);
-  const [alerts, pendingEvidence, reviews, nav, jobRuns, counterUpdates] = await Promise.all([
+  const [alerts, pendingEvidence, reviews, nav, jobRuns, counterUpdates, drafts] = await Promise.all([
     ctx.db.listOpenAlerts(), ctx.db.listPendingAiEvidence(), ctx.db.listDraftExitReviews(),
     ctx.db.latestNav(), ctx.db.latestJobRuns(),
     ctx.db.unseenCounterUpdates().catch(() => []),
+    ctx.db.listDrafts(),
   ]);
   if (!root.isConnected) return;
 
@@ -106,11 +107,15 @@ export async function render(root, ctx) {
   for (const update of counterUpdates) {
     if (!updatesByPlan.has(update.plan_id)) updatesByPlan.set(update.plan_id, update);
   }
-  const count = actionable.length + evidence.length + reviews.length + updatesByPlan.size;
+  const draftCards = drafts.length ? [h("a", {
+    class: "card action-card", href: `#plan-new/${drafts[0].id}`,
+  }, h("strong", null, `${drafts.length} 張計劃卡草稿`))] : [];
+  const count = actionable.length + evidence.length + reviews.length + updatesByPlan.size + draftCards.length;
   root.replaceChildren(...[
     h("p", { class: "lbl today-count" }, `今日待處理 ${count} 件`),
     ...alerts.filter((alert) => alert.kind === "stale").map((alert) => staleNotice(alert, ctx)),
     performanceCard(nav),
+    actionSection("草稿待確認", draftCards),
     actionSection("條件已觸發 · 今天要做決定", actionable.map(alertCard)),
     actionSection("AI 反方觀點有更新", Array.from(updatesByPlan.values(), counterUpdateCard)),
     actionSection("AI 信息評估 · 等你確認", evidence.map(aiCard)),

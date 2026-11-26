@@ -186,6 +186,7 @@ export const planSections = [
 
 // 欄位型別、合法範圍和是否可空，供草稿與修訂共用。
 export const planFields = {
+  sector: { label: "行業", type: "text" },
   thesis: { label: "買入理由", type: "long" },
   catalyst: { label: "催化劑", type: "long" },
   catalyst_due: { label: "催化劑時間", type: "date" },
@@ -221,6 +222,14 @@ export function isPlanValueBlank(value) {
 
 export function missingSupplementFields(plan) {
   return supplementPlanFields.filter((key) => isPlanValueBlank(plan[key]));
+}
+
+export function missingSupplementFieldsFor(plan) {
+  const missing = missingSupplementFields(plan);
+  if (plan.origin === "backfill") {
+    missing.push(...["sector", "planned_weight_pct"].filter((key) => isPlanValueBlank(plan[key])));
+  }
+  return missing;
 }
 
 export function displayPlanValue(key, value) {
@@ -286,6 +295,35 @@ export function planTimestamp(value) {
   return Number.isFinite(millis) ? millis * 1000 + Number(fraction.slice(3, 6)) : -Infinity;
 }
 
+export function planEditTime(value) {
+  const date = fmtDate(value);
+  return date === "—" ? date : `${shortDate(value, false)} ${localClock.format(new Date(value))}`;
+}
+
+export function fieldSources(edits) {
+  const sources = new Map();
+  const drafted = new Set();
+  const sorted = [...edits].sort((a, b) =>
+    (planTimestamp(a.created_at) - planTimestamp(b.created_at)) || Number(a.id ?? 0) - Number(b.id ?? 0));
+  for (const row of sorted) {
+    if (!row.field) continue;
+    if (row.actor === "ai") {
+      drafted.add(row.field);
+      sources.set(row.field, "ai");
+    } else if (row.actor === "user") {
+      const confirmed = row.action === "edit" && row.old_value === row.new_value &&
+        ["thesis", "stop_price"].includes(row.field);
+      sources.set(row.field, drafted.has(row.field) && !confirmed ? "ai_edited" : "user");
+    }
+  }
+  return sources;
+}
+
+export function fieldSourceChip(source) {
+  const labels = { ai: "AI 起草", ai_edited: "AI 起草 · 你改過", user: "你寫的" };
+  return labels[source] ? h("span", { class: `chip plan-source ${source}` }, labels[source]) : null;
+}
+
 export function counterAdopted({ request, plan, amendments = [] }) {
   const view = request?.result?.counter_view;
   if (request?.status !== "done" || !view) return { adopted: false, at: null };
@@ -310,39 +348,6 @@ export function counterAdopted({ request, plan, amendments = [] }) {
     return { adopted: true, at: latest.created_at };
   }
   return { adopted: false, at: null };
-}
-
-export function adoptedCounterView(result, { at, retry } = {}) {
-  const date = fmtDate(at);
-  const content = counterViewResult(result);
-  content.hidden = true;
-  const toggle = h("button", {
-    type: "button", class: "btn text-btn counter-original", "aria-expanded": false,
-    onclick: () => {
-      content.hidden = !content.hidden;
-      toggle.setAttribute("aria-expanded", !content.hidden);
-      toggle.textContent = content.hidden ? "看 AI 原文" : "收起 AI 原文";
-    },
-  }, "看 AI 原文");
-  return h("div", { class: "counter-adopted" },
-    h("div", { class: "counter-adopted-row" },
-      h("span", { class: "lbl" }, date === "—" ? "已採用 AI 看空理由"
-        : `已採用 AI 看空理由（${date.slice(5).replace("-", "/")}）`),
-      toggle, retry,
-    ),
-    content,
-  );
-}
-
-export function counterViewResult(result, action, title = "AI 的看空理由") {
-  return h("div", { class: "counter-result" },
-    h("strong", null, title),
-    h("p", { class: "plan-read-text" }, result.counter_view),
-    result.invalidation_checkable === false && h("p", { class: "warn plan-read-text" },
-      `失效條件不易驗證：${result.invalidation_note}`),
-    h("p", { class: "lbl" }, "AI 只是幫你找反方，是否同意由你決定"),
-    action,
-  );
 }
 
 const invalidationStatusText = {
@@ -377,7 +382,7 @@ export function aiCounterViewBlock(views, { active }) {
   return h("div", { class: "ai-counter-card", id: "ai-counter" },
     h("div", { class: "record-head" },
       h("span", { class: "lbl" }, "AI 每日版"),
-      h("span", { class: "lbl" }, "第三方 · 每個交易日更新"),
+      h("span", { class: "lbl" }, "DeepSeek · 每個交易日更新"),
     ),
     latest ? [
       h("p", { class: "lbl" },
@@ -395,7 +400,7 @@ export function aiCounterViewBlock(views, { active }) {
           aiCounterViewBody(view),
         )),
       ),
-    ] : h("p", { class: "lbl" }, "鎖定後 Mac 會自動產生，約 1–2 分鐘；之後每個交易日收盤後更新"),
+    ] : h("p", { class: "lbl" }, "鎖定後自動產生，約 1 分鐘；之後每個交易日收盤後更新"),
     h("p", { class: "lbl" }, "AI 依公開資料檢索整理，可能有誤，請點來源查證；不是買賣建議"),
   );
 }
@@ -520,10 +525,10 @@ export function setFieldError(wrapper, input, message = "") {
   else input.removeAttribute("aria-invalid");
 }
 
-export function detailsValue(label, value, className = "", badge = false) {
+export function detailsValue(label, value, className = "", badge = false, source) {
   return h("div", { class: "details-value" },
     h("div", { class: "record-meta" }, h("span", { class: "lbl" }, label),
-      badge && h("span", { class: "chip" }, "已修訂")),
+      badge && h("span", { class: "chip" }, "已修訂"), fieldSourceChip(source)),
     h("p", { class: className }, value ?? "—"),
   );
 }

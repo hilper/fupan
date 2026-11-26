@@ -1,8 +1,8 @@
 import { addDays, planChecks, planLossEstimate, symbolInfo } from "../calc.js";
 import { fmtPct, todayStr } from "../format.js";
 import {
-  confidenceField, confirmDialog, counterViewResult,
-  field, h, isPlanValueBlank, missingPlan, planChecksCard,
+  confidenceField, confirmDialog,
+  field, fieldSourceChip, fieldSources, h, isPlanValueBlank, missingPlan, planChecksCard, planEditTime,
   planCheckPanel, planFields, planInput, planSections, planTimestamp, readPlanInput, seg,
   setFieldError, supplementPlanFields,
 } from "../ui.js";
@@ -23,25 +23,35 @@ export async function render(root, ctx) {
   if (params[0] && !draft) return missingPlan(root);
   if (draft && draft.status !== "draft") return navigate(`#plan/${draft.id}`, { replace: true });
 
+  let drafts = draft ? await db.listDrafts().catch(() => []) : [];
+  if (!root.isConnected) return;
   let id = draft?.id;
+  const backfill = draft?.origin === "backfill";
+  const opening = draft?.opening_quantity;
   const today = todayStr();
   const defaultReview = addDays(today, 30);
   const values = {
     ...draft,
     role: draft?.role ?? "觀察",
-    next_review_date: draft?.next_review_date ?? defaultReview,
+    next_review_date: backfill ? draft.next_review_date : draft?.next_review_date ?? defaultReview,
   };
   const pending = new Map();
   const invalid = new Set();
   const editors = new Map();
+  const touched = new Set();
+  const provenance = new Map();
+  const draftEdits = new Map();
+  const draftResults = new Map();
+  let sources = new Map();
+  let draftRequest;
+  let draftError = "";
+  let draftBusy = false;
+  let draftPoll;
   let timer;
   let saving;
   let locking = false;
   let reviewedDate = false;
   let readyToCreate = false;
-  let counterRequest;
-  let counterBusy = false;
-  let counterError = "";
   let rulePrice = null;
   let priceSymbol;
   let priceRequest = 0;
@@ -50,6 +60,7 @@ export async function render(root, ctx) {
   let lastSavedAt;
 
   const completion = h("strong", { "aria-live": "polite" });
+  const draftNav = h("nav", { class: "record-head", "aria-label": "草稿導覽", hidden: true });
   const saveStatus = h("p", { class: "form-status", role: "status" });
   const saveError = h("p", { class: "form-error", role: "alert" });
   const lockError = h("p", { class: "form-error", role: "alert" });
@@ -57,20 +68,14 @@ export async function render(root, ctx) {
   const market = h("p", { class: "lbl", "aria-live": "polite" });
   const ratio = h("p", { class: "plan-calculation" });
   const loss = h("p", { class: "plan-calculation" });
+  const draftStatus = h("p", { role: "status" });
+  const draftNote = h("small", { class: "lbl", hidden: true },
+    "依 AI 知識與搜尋到的公開資料整理，可能有誤；每一欄都可修改。");
+  const draftRetry = h("button", { type: "button", class: "btn", onclick: startDraftRequest }, "重試");
+  const draftPanel = h("div", { class: "draft-ai-status", hidden: true }, draftStatus, draftNote, draftRetry);
   const ruleCard = h("div");
   const missing = h("p", { class: "lbl" });
   const lock = h("button", { class: "btn pri", type: "submit" }, "鎖定計劃卡");
-  const askCounter = h("button", {
-    class: "btn", type: "button", onclick: requestCounterView,
-  }, "請 AI 寫最強的看空理由");
-  const refreshCounter = h("button", {
-    class: "btn text-btn counter-refresh", type: "button", hidden: true, onclick: loadCounterView,
-  }, "重新整理");
-  const counterStatus = h("p", { class: "form-status", role: "status" });
-  const counterResult = h("div", { hidden: true });
-  const counterPanel = h("div", { class: "counter-panel" },
-    h("div", { class: "counter-actions" }, askCounter, refreshCounter), counterStatus, counterResult,
-  );
   const planCheck = planCheckPanel({
     draft: true,
     load: () => db.latestPlanCheck(id),
@@ -89,76 +94,149 @@ export async function render(root, ctx) {
     },
   });
 
-  function waitingForCounter() {
-    return ["queued", "running"].includes(counterRequest?.status);
+  function updateDraftStatus() {
+    const { status, error, done_at: doneAt } = draftRequest ?? {};
+    const failure = draftError || (status === "error" ? error || "處理失敗" : "");
+    const done = !failure && status === "done";
+    draftPanel.hidden = !failure && !status && !draftBusy;
+    draftRetry.hidden = !failure || draftBusy;
+    draftNote.hidden = !done;
+    draftStatus.className = failure ? "form-error" : "form-status";
+    draftStatus.textContent = failure ? `AI 起草失敗：${failure}`
+      : done ? `AI 起草完成 · ${planEditTime(doneAt)} · DeepSeek` : "AI 起草中…";
   }
 
-  function updateCounterButtons() {
-    askCounter.disabled = !id || counterBusy || waitingForCounter();
-    refreshCounter.disabled = counterBusy;
-    refreshCounter.hidden = !id || !(waitingForCounter() || counterError || counterRequest?.status === "error");
-  }
-
-  function showCounterView() {
-    updateCounterButtons();
-    const { status, error } = counterRequest ?? {};
-    counterStatus.textContent = counterError || (
-      waitingForCounter() ? "已送出，Mac 約 1 分鐘內處理，可在鎖定前重新整理查看結果"
-        : status === "error" ? error || "反方觀點處理失敗" : ""
-    );
-    const hasError = Boolean(counterError || status === "error");
-    counterStatus.classList.toggle("form-status", !hasError);
-    counterStatus.classList.toggle("form-error", hasError);
-    const result = status === "done" ? counterRequest.result : null;
-    counterResult.hidden = !result?.counter_view;
-    counterResult.replaceChildren(...(counterResult.hidden ? [] : [
-      counterViewResult(result, null, "AI 反方觀點（參考，鎖定後改為每日自動更新）"),
-    ]));
-  }
-
-  async function loadCounterView() {
-    if (!id || counterBusy) return;
-    counterBusy = true;
-    updateCounterButtons();
-    try {
-      counterRequest = await db.latestCounterView(id);
-      counterError = "";
-    } catch (error) {
-      counterError = error.message;
-    } finally {
-      counterBusy = false;
-      if (root.isConnected) showCounterView();
-    }
-  }
-
-  async function requestCounterView() {
-    if (askCounter.disabled || locking) return;
-    counterBusy = true;
-    counterError = "";
-    updateCounterButtons();
-    try {
-      if (!await flush()) {
-        counterError = saveError.textContent;
-        return;
+  function updateProvenance(rows) {
+    for (const row of rows) draftEdits.set(row.id, row);
+    sources = fieldSources([...draftEdits.values()]);
+    const originals = new Map();
+    for (const row of draftEdits.values()) {
+      if (row.actor === "ai" && (!originals.has(row.field) || row.id > originals.get(row.field).id)) {
+        originals.set(row.field, row);
       }
-      counterRequest = await db.requestCounterView(id);
-    } catch (error) {
-      counterError = error.message;
-    } finally {
-      counterBusy = false;
-      if (root.isConnected) showCounterView();
     }
+    for (const [key, { chip, original, originalValue, confirm }] of provenance) {
+      const source = sources.get(key);
+      const badge = fieldSourceChip(source);
+      chip.replaceChildren(...(badge ? [badge] : []));
+      chip.hidden = !badge;
+      const edit = originals.get(key);
+      if (original) {
+        original.hidden = !edit;
+        if (edit) {
+          const result = draftResults.get(edit.request_id);
+          originalValue.textContent = String(result?.[key] ?? edit.new_value);
+          if (key === "stop_price" && result?.stop_basis) {
+            originalValue.textContent += `\n依據：${result.stop_basis}`;
+          }
+        }
+      }
+      if (confirm) confirm.hidden = source !== "ai";
+    }
+    refresh();
+  }
+
+  function scheduleDraftPoll() {
+    clearTimeout(draftPoll);
+    if (root.isConnected) draftPoll = setTimeout(loadDraftRequest, 5000);
+  }
+
+  async function loadDraftRequest() {
+    if (!root.isConnected || draftBusy) return;
+    draftBusy = true;
+    try {
+      const [request, rows] = await Promise.all([db.latestPlanDraft(id), db.listPlanEdits(id)]);
+      if (!root.isConnected) return;
+      draftRequest = request;
+      if (request) draftError = "";
+      if (request?.status === "done") {
+        draftResults.set(request.id, request.result);
+        const plan = await db.getPlan(id);
+        if (!root.isConnected) return;
+        for (const key of request.result?.written ?? []) {
+          const input = editors.get(key);
+          if (!input || touched.has(key) || !isPlanValueBlank(input.value) ||
+              !isPlanValueBlank(values[key]) || isPlanValueBlank(plan?.[key])) continue;
+          values[key] = plan[key];
+          input.value = plan[key];
+        }
+      }
+      updateProvenance(rows);
+      const missingResults = new Set(rows.filter((row) =>
+        row.actor === "ai" && row.request_id != null && !draftResults.has(row.request_id))
+        .map((row) => row.request_id));
+      await Promise.all([...missingResults].map(async (requestId) => {
+        const older = await db.latestPlanDraft(id, requestId);
+        if (older) draftResults.set(requestId, older.result);
+      }));
+      if (missingResults.size && root.isConnected) updateProvenance([]);
+      if (["queued", "running"].includes(request?.status)) scheduleDraftPoll();
+    } catch {
+      scheduleDraftPoll();
+    } finally {
+      draftBusy = false;
+      if (root.isConnected) updateDraftStatus();
+    }
+  }
+
+  async function startDraftRequest() {
+    if (!id || draftBusy) return;
+    draftBusy = true;
+    draftError = "";
+    draftRequest = null;
+    updateDraftStatus();
+    try {
+      draftRequest = await db.requestPlanDraft(id);
+      scheduleDraftPoll();
+    } catch (error) {
+      draftError = error.message;
+    } finally {
+      draftBusy = false;
+      if (root.isConnected) updateDraftStatus();
+    }
+  }
+
+  function sourceLabel(key, label) {
+    const chip = h("span", { hidden: true });
+    const originalValue = h("p", { class: "plan-read-text" });
+    const original = h("details", { class: "plan-draft-original", hidden: true },
+      h("summary", null, "看 AI 原稿"), originalValue);
+    const confirm = ["thesis", "stop_price"].includes(key) ? h("button", {
+      class: "btn text-btn", type: "button", hidden: true, onclick: async () => {
+        if (locking || confirm.disabled) return;
+        confirm.disabled = true;
+        try {
+          if (!await flush() || sources.get(key) !== "ai" || !filled(key)) return;
+          const value = String(values[key]);
+          const rows = await db.addPlanEdits([{
+            plan_id: id, field: key, old_value: value, new_value: value, actor: "user", action: "edit",
+          }]);
+          if (root.isConnected) updateProvenance(rows);
+        } catch (error) {
+          if (root.isConnected) toast(error.message, "error");
+        } finally {
+          confirm.disabled = false;
+        }
+      },
+    }, key === "stop_price" ? "確認此價" : "確認") : null;
+    provenance.set(key, { chip, original, originalValue, confirm });
+    const heading = h("div", { class: "record-meta plan-field-heading" }, chip, confirm);
+    label.replaceWith(heading);
+    heading.prepend(label);
+    return original;
   }
 
   function record(key, value) {
     if (values[key] === value) return;
     values[key] = value;
+    touched.add(key);
     pending.set(key, value);
   }
 
   function updateField(key, wrapper, input, value, error) {
     setFieldError(wrapper, input, error);
     if (error) {
+      touched.add(key);
       invalid.add(key);
       pending.delete(key);
       delete values[key];
@@ -179,7 +257,11 @@ export async function render(root, ctx) {
 
   function identity(key, label) {
     const input = h("input", { type: "text", value: values[key], autocomplete: "off" });
-    const wrapper = field(label, input);
+    const wrapper = field(label, input, backfill && key === "sector" ? "可留空" : null);
+    if (key === "sector") {
+      editors.set(key, input);
+      input.after(sourceLabel(key, wrapper.querySelector("label")));
+    }
 
     function read(commit) {
       const raw = input.value.trim();
@@ -193,7 +275,7 @@ export async function render(root, ctx) {
           if (commit) input.value = info.symbol;
         }
       } else {
-        updateField(key, wrapper, input, raw, !raw && id ? "此欄必填" : "");
+        updateField(key, wrapper, input, raw, key === "name" && !raw && id ? "此欄必填" : "");
       }
       refresh();
       if (commit) {
@@ -204,7 +286,10 @@ export async function render(root, ctx) {
       }
     }
 
-    input.addEventListener("input", () => read(false));
+    input.addEventListener("input", () => {
+      touched.add(key);
+      read(false);
+    });
     input.addEventListener("change", () => read(true));
     input.addEventListener("blur", () => {
       if (!id && !saving && !saveError.textContent) read(true);
@@ -232,7 +317,10 @@ export async function render(root, ctx) {
     const confidence = key === "confidence" ? confidenceField(values[key]) : null;
     const input = confidence?.input ?? planInput(definition, values[key]);
     editors.set(key, input);
-    const wrapper = confidence?.wrapper ?? field(definition.label, input, definition.optional ? "可留空" : null);
+    const optional = definition.optional || backfill && ["planned_weight_pct", "next_review_date"].includes(key);
+    const hint = backfill && key === "next_review_date" ? "留空時，鎖定後預設為 30 天後" : optional ? "可留空" : null;
+    const wrapper = confidence?.wrapper ?? field(definition.label, input, hint);
+    input.after(sourceLabel(key, wrapper.querySelector("label")));
 
     function read(commit) {
       const { value, error } = readPlanInput(definition, input);
@@ -246,7 +334,10 @@ export async function render(root, ctx) {
       else schedule();
     }
 
-    input.addEventListener("input", () => read(false));
+    input.addEventListener("input", () => {
+      touched.add(key);
+      read(false);
+    });
     input.addEventListener("change", () => read(true));
     return wrapper;
   }
@@ -261,7 +352,6 @@ export async function render(root, ctx) {
     let content = [...fields.values()];
     if (index === 2) content = [pair(keys)];
     if (index === 5) content = [pair(keys.slice(0, 2)), pair(keys.slice(2))];
-    if (index === 8) content.push(counterPanel);
     sections.push({ keys, state, number });
     return h("section", { class: "card plan-step-card" },
       h("header", { class: "plan-step-heading" }, number, h("h2", null, title), state),
@@ -269,25 +359,29 @@ export async function render(root, ctx) {
     );
   }
 
+  const roleLabel = h("span", { class: "lbl", id: "plan-role-label" }, "角色");
+  const roleChip = h("span", { hidden: true });
+  provenance.set("role", { chip: roleChip });
   const optionalSummary = h("summary");
   const formContent = h("fieldset", { class: "stack plan-form-fields" },
-    h("h2", null, "鎖定前必填"),
+    !backfill && h("h2", null, "鎖定前必填"),
     h("section", { class: "card" },
       h("div", { class: "grid-two" }, codeField, nameField),
       market, sectorField,
       h("div", { class: "field" },
-        h("span", { class: "lbl", id: "plan-role-label" }, "角色"),
+        h("div", { class: "record-meta" }, roleLabel, roleChip),
         seg(roles, values.role, (role) => {
           record("role", role);
           void flush();
         }, "plan-role-label"),
       ),
     ),
+    backfill && h("h2", null, "鎖定前必填"),
     step(0, ["thesis"]),
     step(3, ["stop_price"]),
     step(4, ["planned_weight_pct"], loss),
     h("section", { class: "card" }, editor("next_review_date"),
-      h("label", { class: "check-label" }, dateSeen, "我已確認下次複查日")),
+      !backfill && h("label", { class: "check-label" }, dateSeen, "我已確認下次複查日")),
     h("section", { class: "card" }, planCheck.panel),
     ruleCard,
     h("div", { class: "card" }, lock, missing, lockError),
@@ -299,13 +393,21 @@ export async function render(root, ctx) {
     )),
   );
 
+  root.append(draftNav);
+  if (backfill) {
+    root.append(h("section", { class: "card opening-summary" },
+      h("span", { class: "chip" }, "補建卡"),
+      opening != null && h("p", { class: "lbl" },
+        `期初持倉：${opening} 股 · 成本 ${draft.opening_cost} · ${draft.opening_date}（截圖匯入）`)));
+  }
   root.append(h("div", { class: "draft-summary" },
     completion,
-    saveStatus, saveError, retry,
+    saveStatus, saveError, retry, draftPanel,
   ), h("form", { onsubmit: lockDraft, novalidate: true }, formContent));
+  renderDraftNav();
   refresh();
   if (id) {
-    void loadCounterView();
+    void loadDraftRequest();
     void planCheck.refresh();
   }
   if (settings?.start_date) {
@@ -320,7 +422,18 @@ export async function render(root, ctx) {
   }, () => {});
 
   function identityComplete() {
-    return ["symbol", "name", "sector"].every((key) => values[key] && !invalid.has(key));
+    return ["symbol", "name"].every((key) => values[key] && !invalid.has(key));
+  }
+
+  function renderDraftNav() {
+    const index = drafts.findIndex((item) => item.id === id);
+    draftNav.hidden = drafts.length < 2 || index < 0;
+    if (draftNav.hidden) return;
+    const next = drafts[(index + 1) % drafts.length];
+    draftNav.replaceChildren(h("span", { class: "lbl" }, `草稿 ${index + 1} / ${drafts.length}`),
+      h("button", { class: "btn", type: "button", onclick: async () => {
+        if (!locking && await flush() && !locking && root.isConnected) navigate(`#plan-new/${next.id}`);
+      } }, "下一張 ›"));
   }
 
   function filled(key) {
@@ -360,10 +473,16 @@ export async function render(root, ctx) {
     }
     const optionalFilled = supplementPlanFields.filter(filled).length;
     optionalSummary.textContent = `其他項目（可鎖定後再補）· 已填 ${optionalFilled} / ${supplementPlanFields.length}`;
-    const required = [
+    const confirmedFields = ["thesis", "stop_price"].map((key) => {
+      const label = planFields[key].label;
+      if (sources.get(key) === "ai") return [false, `確認${label}（AI 起草，請修改或確認）`];
+      return [filled(key) && (key !== "thesis" || Boolean(values.thesis?.trim())), label];
+    });
+    const required = backfill ? confirmedFields : [
       [filled("symbol") && filled("name"), "代碼與名稱"],
       [filled("sector"), "行業"],
-      ...["thesis", "stop_price", "planned_weight_pct"].map((key) => [filled(key), planFields[key].label]),
+      ...confirmedFields,
+      [filled("planned_weight_pct"), planFields.planned_weight_pct.label],
       [reviewedDate && filled("next_review_date"), "確認下次複查日"],
     ];
     const remaining = required.filter(([done]) => !done).map(([, label]) => label);
@@ -371,7 +490,6 @@ export async function render(root, ctx) {
     missing.textContent = remaining.length ? `尚需完成：${remaining.join("、")}` : "";
     lock.disabled = locking || Boolean(remaining.length);
     formContent.disabled = locking;
-    updateCounterButtons();
     planCheck.update();
 
     const gain = values.expected_up_pct;
@@ -409,16 +527,28 @@ export async function render(root, ctx) {
         if (id) {
           const saved = await db.saveDraft(id, Object.fromEntries(batch));
           lastSavedAt = saved?.updated_at ?? new Date().toISOString();
+          // 欄位與紀錄由資料庫一併保存，這裡只更新畫面出處。
+          const rows = await db.listPlanEdits(id).catch(() => null);
+          if (root.isConnected) {
+            if (rows) updateProvenance(rows);
+            else scheduleDraftPoll();
+          }
         } else {
           const created = await db.createDraft({
             next_review_date: defaultReview,
             role: values.role,
             ...Object.fromEntries(batch),
-            symbol: values.symbol, market: values.market, name: values.name, sector: values.sector,
+            symbol: values.symbol, market: values.market, name: values.name, sector: values.sector ?? "",
           });
           id = created.id;
-          updateCounterButtons();
-          if (root.isConnected) history.replaceState(history.state, "", `#plan-new/${id}`);
+          void startDraftRequest();
+          if (root.isConnected) {
+            history.replaceState(history.state, "", `#plan-new/${id}`);
+            void db.listDrafts().then((rows) => {
+              drafts = rows;
+              if (root.isConnected) renderDraftNav();
+            }, () => {});
+          }
         }
         planCheck.update();
       } catch (error) {
@@ -445,15 +575,24 @@ export async function render(root, ctx) {
     locking = true;
     refresh();
     try {
-      if (!await confirmDialog("鎖定後已填的內容不能修改；空白的項目之後可以補填一次。確定鎖定？")) return;
+      const confirmation = backfill
+        ? `鎖定後已填的內容不能修改；空白項目之後可以補填一次。${opening != null ? `鎖定時會寫入期初持倉 ${opening} 股。` : ""}確定鎖定？`
+        : "鎖定後已填的內容不能修改；空白的項目之後可以補填一次。確定鎖定？";
+      if (!await confirmDialog(confirmation)) return;
       readyToCreate = true;
       if (!await flush()) {
         lockError.textContent = saveError.textContent;
         return;
       }
       await db.lockPlan(id);
+      void db.requestCounterView(id).catch(() => {});
       toast("已鎖定");
-      if (root.isConnected) navigate(`#plan/${id}`, { replace: true });
+      if (!root.isConnected) return;
+      const remaining = await db.listDrafts().catch(() => drafts.filter((item) => item.id !== id));
+      const index = drafts.findIndex((item) => item.id === id);
+      const later = new Set(index < 0 ? [] : drafts.slice(index + 1).map((item) => item.id));
+      const next = remaining.find((item) => later.has(item.id)) ?? remaining[0];
+      if (root.isConnected) navigate(next ? `#plan-new/${next.id}` : `#plan/${id}`, { replace: true });
     } catch (error) {
       lockError.textContent = error.cause?.message ?? error.message;
     } finally {

@@ -16,7 +16,7 @@ const settingsDefaults = {
 
 const settingsColumns = Object.keys(settingsDefaults).join(",");
 const alertColumns = "*,plans(name,symbol,market,stop_price)";
-const counterViewColumns = "status,error,result,done_at";
+const planCheckColumns = "status,error,result,done_at";
 const exitReviewEditableColumns = [
   "thesis_verdict", "pnl_sources", "next_time", "is_repeat", "decision_quality", "error_tags",
   "return_pct", "bench_return_pct", "excess_pct",
@@ -114,6 +114,16 @@ export function createDb(client) {
         .from("plans").select("*").order("id", { ascending: false }));
     },
 
+    listDrafts() {
+      return readRows("讀取計劃卡草稿失敗", () => client.from("plans")
+        .select("*").eq("status", "draft").order("created_at", { nullsFirst: false }).order("id"));
+    },
+
+    async lookupSymbols(items) {
+      const data = await readResult("查詢代碼失敗", () => client.functions.invoke("symbol-lookup", { body: { items } }));
+      return data.results;
+    },
+
     getPlan(id) {
       return readResult("讀取計劃卡失敗", () => client
         .from("plans").select("*").eq("id", id).maybeSingle());
@@ -134,16 +144,32 @@ export function createDb(client) {
         .from("plans").update(values).eq("id", id).not("locked_at", "is", null).select().single());
     },
 
-    requestCounterView(planId) {
-      return readResult("送出反方觀點請求失敗", () => client.from("ai_requests")
-        .insert({ kind: "counter_view", plan_id: planId }).select(counterViewColumns).single());
+    async requestPlanDraft(planId) {
+      const request = await readResult("送出 AI 起草請求失敗", () => client.from("ai_requests")
+        .insert({ kind: "plan_draft", plan_id: planId })
+        .select("id,status,error,result,done_at").single());
+      void client.functions.invoke("ai-draft", { body: { request_id: request.id } }).catch(() => {});
+      return request;
     },
 
-    latestCounterView(planId) {
-      return readResult("讀取反方觀點請求失敗", () => client.from("ai_requests")
-        .select(counterViewColumns).eq("kind", "counter_view").eq("plan_id", planId)
-        .order("created_at", { ascending: false, nullsFirst: false }).order("id", { ascending: false })
-        .limit(1).maybeSingle());
+    latestPlanDraft(planId, requestId) {
+      return readResult("讀取 AI 起草請求失敗", () => {
+        const query = client.from("ai_requests").select("id,status,error,result,done_at")
+          .eq("kind", "plan_draft").eq("plan_id", planId);
+        return (requestId == null ? query : query.eq("id", requestId))
+          .order("created_at", { ascending: false, nullsFirst: false }).order("id", { ascending: false })
+          .limit(1).maybeSingle();
+      });
+    },
+
+    listPlanEdits(planId) {
+      return readRows("讀取編輯紀錄失敗", () => client.from("plan_edits").select("*")
+        .eq("plan_id", planId).order("id"));
+    },
+
+    addPlanEdits(rows) {
+      return readResult("新增編輯紀錄失敗", () => client.from("plan_edits")
+        .insert(rows).select());
     },
 
     aiCounterViews(planId, limit = 30) {
@@ -171,12 +197,12 @@ export function createDb(client) {
 
     requestPlanCheck(planId) {
       return readResult("送出 AI 體檢請求失敗", () => client.from("ai_requests")
-        .insert({ kind: "plan_check", plan_id: planId }).select(counterViewColumns).single());
+        .insert({ kind: "plan_check", plan_id: planId }).select(planCheckColumns).single());
     },
 
     latestPlanCheck(planId, { doneOnly = false } = {}) {
       return readResult("讀取 AI 體檢請求失敗", () => {
-        const query = client.from("ai_requests").select(counterViewColumns)
+        const query = client.from("ai_requests").select(planCheckColumns)
           .eq("kind", "plan_check").eq("plan_id", planId);
         return (doneOnly ? query.eq("status", "done") : query)
           .order("created_at", { ascending: false, nullsFirst: false })
@@ -186,6 +212,12 @@ export function createDb(client) {
 
     lockPlan(id) {
       return readResult("鎖定計劃卡失敗", () => client.rpc("lock_plan", { p_id: id }));
+    },
+
+    requestCounterView(planId) {
+      return readResult("產生 AI 反方觀點失敗", () => client.functions.invoke("counter-daily", {
+        body: { plan_id: planId },
+      }));
     },
 
     setNextReview(id, date, { allowClosed = false } = {}) {

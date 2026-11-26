@@ -2,9 +2,9 @@ import { addDays, buildPositions, effectivePlan, planChecks, tradeReturn } from 
 import { fmtDate, fmtMoney, fmtPct, todayStr } from "../format.js";
 import {
   aiCounterViewBlock, allowedPlanAmendments, amendablePlanFields, confidenceField,
-  detailsValue, displayPlanValue, field, h, isPlanValueBlank, missingPlan,
-  missingSupplementFields, planCheckPanel, planCheckResult, planChecksCard, planFields,
-  planInput, planSections, planTimestamp, pnlColor, readPlanInput, setFieldError,
+  detailsValue, displayPlanValue, field, fieldSourceChip, fieldSources, h, isPlanValueBlank, missingPlan,
+  missingSupplementFieldsFor, planCheckPanel, planCheckResult, planChecksCard, planFields,
+  planEditTime, planInput, planSections, planTimestamp, pnlColor, readPlanInput, setFieldError,
 } from "../ui.js";
 import { actionableAlerts, alertCard } from "./alert.js";
 import { evidenceLogRow } from "./evidence.js";
@@ -48,16 +48,16 @@ export async function finalizeClose(db, plan, today) {
   return review;
 }
 
-function planContent(plan, amendments, { missing = [], supplement, counterViewBlock, check } = {}) {
+function planContent(plan, sources, { editCount = 0, missing = [], supplement, counterViewBlock, check } = {}) {
   const draft = plan.status === "draft";
   const sections = planSections.map(([title, keys], index) => {
     return h("section", { class: "plan-read-section" },
       h("h3", null, `${index + 1}　${title}`),
       keys.map((key) => {
         const blank = isPlanValueBlank(plan[key]);
-        const label = index === 8 && key === "counter_view" ? "我寫的" : planFields[key].label;
+        const label = key === "counter_view" && !sources.has(key) ? "我寫的" : planFields[key].label;
         return detailsValue(label, blank ? "待補" : displayPlanValue(key, plan[key]),
-          blank ? "plan-pending" : "", plan.amended?.has(key));
+          blank ? "plan-pending" : "", plan.amended?.has(key), sources.get(key));
       }),
       index === 2 && plan.expected_up_pct != null && Number(plan.expected_down_pct) > 0 &&
         h("p", { class: "lbl" }, `賺賠比 ${(plan.expected_up_pct / plan.expected_down_pct).toFixed(1)} : 1`),
@@ -68,15 +68,18 @@ function planContent(plan, amendments, { missing = [], supplement, counterViewBl
     h("div", { class: "record-head" },
       h("div", { class: "record-meta" }, h("h2", null, "計劃卡"),
         missing.length > 0 && h("span", { class: "plan-pending" }, `待補 ${missing.length} 項`)),
-      !draft && h("span", { class: "lbl" }, `${fmtDate(plan.locked_at)} 鎖定 · 修訂 ${amendments.length} 次`)),
+      !draft && h("span", { class: "lbl" }, `${fmtDate(plan.locked_at)} 鎖定 · 編輯 ${editCount} 次`)),
     supplement,
+    detailsValue(planFields.sector.label, plan.sector || "待補", "", false, sources.get("sector")),
     sections,
     check && h("section", { class: "plan-read-section" }, check),
-    draft && plan.next_review_date && detailsValue("下次複查日", fmtDate(plan.next_review_date)),
+    draft && plan.next_review_date &&
+      detailsValue("下次複查日", fmtDate(plan.next_review_date), "", false, sources.get("next_review_date")),
   );
 }
 
 async function saveSupplement(root, ctx, planId, values) {
+  // 資料庫在補填交易內追加每個欄位的編輯紀錄。
   await ctx.db.supplementPlan(planId, values);
   ctx.toast("已補填");
   if (root.isConnected) await render(root, ctx);
@@ -143,11 +146,12 @@ function supplementForm(root, ctx, planId, missing) {
   };
 }
 
-function heading(plan, status) {
+function heading(plan, status, sources) {
   return h("div", { class: "record-meta plan-meta" },
     h("span", { class: "lbl" }, `${plan.symbol} · ${plan.market === "HK" ? "港股" : "A 股"}`),
-    h("span", { class: "chip" }, plan.role),
+    h("span", { class: "chip" }, plan.role), fieldSourceChip(sources.get("role")),
     h("span", { class: "chip" }, status),
+    plan.origin === "backfill" && h("span", { class: "chip" }, "補建卡"),
   );
 }
 
@@ -244,9 +248,9 @@ function amendmentForm(root, ctx, plan) {
   };
 }
 
-function reviewCard(root, ctx, plan, today) {
+function reviewCard(root, ctx, plan, today, source) {
   const shownDate = h("p", null, fmtDate(plan.next_review_date));
-  const title = h("h2", null, "下次複查");
+  const title = h("div", { class: "record-meta" }, h("h2", null, "下次複查"), fieldSourceChip(source));
   if (plan.status !== "active") return h("section", { class: "card" }, title, shownDate);
   const errorText = h("p", { class: "form-error", role: "alert" });
   const input = h("input", { type: "date", value: addDays(today, 30), required: true });
@@ -295,7 +299,8 @@ function tradeHistory(trades) {
     trades.length ? h("ul", { class: "record-list" }, trades.map((trade) =>
       h("li", { class: "record" },
         h("div", { class: "record-head" },
-          h("strong", null, fmtDate(trade.trade_date), " · ", trade.side === "buy" ? "買入" : "賣出"),
+          h("strong", null, fmtDate(trade.trade_date), " · ",
+            trade.is_opening ? "期初持倉（截圖匯入）" : trade.side === "buy" ? "買入" : "賣出"),
           h("span", { class: trade.in_plan ? "chip" : "chip warn" }, trade.in_plan ? "計劃內" : "計劃外"),
         ),
         h("p", { class: "lbl" }, `${trade.quantity} 股 · 價格 ${fmtMoney(trade.price)} · 費用 ${fmtMoney(trade.fee)} ${trade.currency}`),
@@ -317,6 +322,57 @@ function evidenceLog(plan, evidence) {
   );
 }
 
+function planEditHistory(edits, amendments, form) {
+  const rows = [];
+  const aiDrafts = new Map();
+  for (const row of edits) {
+    if (row.actor !== "ai") {
+      rows.push(row);
+      continue;
+    }
+    const key = row.request_id == null ? `edit-${row.id}` : row.request_id;
+    const draft = aiDrafts.get(key);
+    if (draft) {
+      draft.fields.push(row.field);
+      if (planTimestamp(row.created_at) > planTimestamp(draft.created_at)) draft.created_at = row.created_at;
+    } else {
+      aiDrafts.set(key, { ...row, fields: [row.field] });
+    }
+  }
+  rows.push(...aiDrafts.values(), ...amendments);
+  rows.sort((a, b) => (planTimestamp(b.created_at) - planTimestamp(a.created_at)) || Number(b.id) - Number(a.id));
+  return h("section", { class: "card" },
+    h("h2", null, "編輯紀錄"),
+    rows.length ? h("ul", { class: "record-list" }, rows.map((row) => {
+      const label = planFields[row.field]?.label ?? (row.field === "role" ? "角色" : row.field);
+      const actor = row.actor === "ai" ? "AI" : "你";
+      const confirmed = row.actor === "user" && row.action === "edit" && row.old_value === row.new_value;
+      const title = row.actor === "ai"
+        ? `起草 ${row.fields.length} 欄：${row.fields.map((key) => planFields[key]?.label ?? key).join("、")}`
+        : row.action === "lock" ? "鎖定計劃卡"
+          : `${confirmed ? "確認" : ({ edit: "修改", supplement: "補填", amendment: "修訂" })[row.action]} ${label}`;
+      const heading = h("span", { class: "plan-edit-heading" },
+        h("time", { class: "lbl", datetime: row.created_at }, planEditTime(row.created_at)),
+        h("span", { class: `chip plan-source ${row.actor}` }, actor),
+        h("strong", null, title),
+      );
+      const value = displayPlanValue(row.field, row.new_value);
+      return h("li", { class: "record" },
+        !confirmed && (row.action === "edit" || row.action === "supplement") ? h("details", { class: "plan-edit-change" },
+          h("summary", null, heading),
+          detailsValue("改前", displayPlanValue(row.field, row.old_value), "plan-read-text"),
+          detailsValue("改後", value, "plan-read-text"),
+        ) : heading,
+        row.action === "amendment" && [
+          h("p", { class: "plan-read-text" }, value),
+          h("p", { class: "record-note" }, row.reason),
+        ],
+      );
+    })) : h("p", { class: "lbl" }, "尚無編輯紀錄"),
+    form,
+  );
+}
+
 export async function render(root, ctx) {
   const { db, params, toast, setTitle } = ctx;
   const original = await db.getPlan(params[0]);
@@ -327,28 +383,35 @@ export async function render(root, ctx) {
     db.listOpenAlerts(original.id),
     db.listEvidence(original.id),
   ];
+  const editsRequest = db.listPlanEdits(original.id);
   if (original.status === "draft") {
-    const [alerts, evidence] = await Promise.all(related);
+    const [alerts, evidence, edits] = await Promise.all([...related, editsRequest]);
+    const sources = fieldSources(edits);
     if (!root.isConnected) return;
-    root.replaceChildren(heading(original, "草稿"),
+    root.replaceChildren(heading(original, "草稿", sources),
       ...actionableAlerts(alerts).map(alertCard),
       h("a", { class: "btn pri", href: `#plan-new/${original.id}` }, "繼續編輯"),
-      planContent(original, []),
+      planContent(original, sources),
+      planEditHistory(edits, []),
       evidenceLog(original, evidence),
     );
     return;
   }
 
   const today = todayStr();
-  const [amendments, trades, alerts, evidence, counterViews] = await Promise.all([
+  const [amendments, trades, alerts, evidence, edits, counterViews] = await Promise.all([
     db.listAmendments(original.id), db.listTrades(original.id),
-    ...related,
+    ...related, editsRequest,
     db.aiCounterViews(original.id).catch(() => null),
   ]);
   if (counterViews?.length && !counterViews.some((view) => view.changed)) {
     const lastChange = await db.latestChangedCounterView(original.id).catch(() => null);
     if (lastChange?.view_date < counterViews[0].view_date) counterViews.push(lastChange);
   }
+  const amendmentEdits = amendments.map((row) => ({ ...row, actor: "user", action: "amendment" }));
+  const sources = fieldSources([...edits, ...amendmentEdits]);
+  const editCount = edits.filter((row) => row.actor === "user" &&
+    ["edit", "supplement"].includes(row.action)).length + amendments.length;
   const held = buildPositions(trades, today).get(original.id);
   let review = original.status === "closed" ? await db.getExitReview(original.id) : null;
   let status = original.status;
@@ -395,7 +458,7 @@ export async function render(root, ctx) {
   const latestClosedCheck = status === "closed"
     ? await db.latestPlanCheck(plan.id, { doneOnly: true }).catch(() => null) : null;
   if (!root.isConnected) return;
-  const missing = status === "active" ? missingSupplementFields(original) : [];
+  const missing = status === "active" ? missingSupplementFieldsFor(original) : [];
   const supplement = missing.length ? supplementForm(root, ctx, original.id, missing) : null;
   const amendment = status === "active" ? amendmentForm(root, ctx, plan) : null;
   const check = status === "active" ? planCheckPanel({
@@ -416,37 +479,23 @@ export async function render(root, ctx) {
     },
   }) : null;
   root.replaceChildren(
-    heading(plan, statusLabel[status]),
+    heading(plan, statusLabel[status], sources),
     ...actionableAlerts(alerts).map(alertCard),
     positionCard(plan, held, position, quote),
     status === "active" && h("div", { class: "grid-two" },
       h("a", { class: "btn pri", href: `#trade/${plan.id}` }, "記一筆成交"),
       h("a", { class: "btn", href: `#import/${plan.id}` }, "從截圖匯入"),
     ),
-    planContent(plan, amendments, {
-      missing,
+    planContent(plan, sources, {
+      editCount, missing,
       supplement: supplement?.form,
       counterViewBlock: counterViews && aiCounterViewBlock(counterViews, { active: status === "active" }),
       check: check?.panel ?? (latestClosedCheck?.result && planCheckResult(latestClosedCheck.result)),
     }),
     checks && planChecksCard(checks),
-    h("section", { class: "card" },
-      h("h2", null, "修訂紀錄"),
-      amendments.length ? h("ul", { class: "record-list" }, amendments.map((row) =>
-        h("li", { class: "record" },
-          h("div", { class: "record-head" },
-            h("strong", null, planFields[row.field]?.label ?? row.field),
-            h("time", { class: "lbl", datetime: row.created_at }, row.created_at
-              ? new Date(row.created_at).toLocaleString("zh-TW", { hour12: false }) : "—"),
-          ),
-          h("p", { class: "plan-read-text" }, displayPlanValue(row.field, row.new_value)),
-          h("p", { class: "record-note" }, row.reason),
-        ),
-      )) : h("p", { class: "lbl" }, "尚無修訂"),
-      amendment?.form,
-    ),
+    planEditHistory(edits, amendmentEdits, amendment?.form),
     evidenceLog(plan, evidence),
-    reviewCard(root, ctx, plan, today),
+    reviewCard(root, ctx, plan, today, sources.get("next_review_date")),
     tradeHistory(trades),
     status === "closed" && review ? h("a", {
       class: "card review-action", href: `#exit-review/${review.id}`,

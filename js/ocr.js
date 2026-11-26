@@ -1,5 +1,5 @@
 const enginePath = "vendor/tesseract-7.0.0";
-const passes = [
+const reviewPasses = [
   ["full", 0, 1, ""],
   ["left", 0, 0.33, "0123456789-"],
   ["mid", 0.33, 0.6, "0123456789.,-+"],
@@ -67,39 +67,56 @@ function prepareCanvas(canvas, image, start, end, scale) {
   context.putImageData(pixels, 0, 0);
 }
 
-async function recognizeFile(file, onProgress) {
+async function recognizeFile(file, passes, onProgress) {
   const worker = await getWorker(onProgress);
   const url = URL.createObjectURL(file);
   const canvas = document.createElement("canvas");
   try {
     const image = new Image();
-    image.src = url;
-    await image.decode();
-    const scale = Math.min(2, Math.sqrt(16e6 / (image.naturalWidth * image.naturalHeight)));
-    const result = {};
-    for (const [index, [column, start, end, whitelist]] of passes.entries()) {
-      onProgress?.(`識別中 ${index + 1}/4…`);
-      prepareCanvas(canvas, image, start, end, scale);
-      await worker.setParameters({ tessedit_pageseg_mode: "6", tessedit_char_whitelist: whitelist });
-      const { data } = await worker.recognize(canvas, {}, { blocks: true });
-      result[column] = (data.blocks ?? []).flatMap((block) => block.paragraphs.flatMap(
-        (paragraph) => paragraph.lines.map(({ text, bbox }) => ({
-          text: text.trim(), y0: bbox.y0 / scale, y1: bbox.y1 / scale,
-        })),
-      ));
+    let timeout;
+    try {
+      await new Promise((resolve, reject) => {
+        image.onload = resolve;
+        image.onerror = () => reject(new Error("圖片無法開啟"));
+        timeout = setTimeout(() => reject(new Error("讀取圖片逾時")), 20_000);
+        image.src = url;
+      });
+    } finally {
+      clearTimeout(timeout);
+      image.onload = image.onerror = null;
     }
-    return result;
-  } catch (error) {
-    throw new Error("截圖識別失敗，請確認圖片可開啟後再試", { cause: error });
+
+    try {
+      const scale = Math.min(2, Math.sqrt(16e6 / (image.naturalWidth * image.naturalHeight)));
+      const result = {};
+      for (const [index, [column, start, end, whitelist]] of passes.entries()) {
+        onProgress?.(`識別中 ${index + 1}/${passes.length}…`);
+        prepareCanvas(canvas, image, start, end, scale);
+        await worker.setParameters({ tessedit_pageseg_mode: "6", tessedit_char_whitelist: whitelist });
+        const { data } = await worker.recognize(canvas, {}, { blocks: true });
+        result[column] = (data.blocks ?? []).flatMap((block) => block.paragraphs.flatMap(
+          (paragraph) => paragraph.lines.map(({ text, bbox }) => ({
+            text: text.trim(), y0: bbox.y0 / scale, y1: bbox.y1 / scale,
+          })),
+        ));
+      }
+      return result;
+    } catch (error) {
+      throw new Error("截圖識別失敗，請確認圖片可開啟後再試", { cause: error });
+    }
   } finally {
     URL.revokeObjectURL(url);
     canvas.width = canvas.height = 0;
   }
 }
 
-export async function recognizeReview(file, { onProgress } = {}) {
-  // 四次辨識共用參數，上一張完成後才能設定下一張的白名單。
-  const result = queue.then(() => recognizeFile(file, onProgress));
+export async function recognizeColumns(file, passes, { onProgress } = {}) {
+  // 每張圖共用同一個 worker，完成後才能設定下一張的白名單。
+  const result = queue.then(() => recognizeFile(file, passes, onProgress));
   queue = result.catch(() => {});
   return result;
+}
+
+export function recognizeReview(file, options) {
+  return recognizeColumns(file, reviewPasses, options);
 }

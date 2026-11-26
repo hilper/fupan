@@ -1,6 +1,6 @@
 import { buildPositions, effectivePlan, snapshot } from "../calc.js";
 import { fmtDate, fmtMoney, fmtPct, todayStr } from "../format.js";
-import { allowedPlanAmendments, detailsValue, h, missingSupplementFields, pnlColor } from "../ui.js";
+import { allowedPlanAmendments, detailsValue, h, missingSupplementFieldsFor, pnlColor } from "../ui.js";
 
 const evidenceLabels = { strengthen: "強化", weaken: "削弱", none: "不變" };
 
@@ -18,7 +18,7 @@ export async function loadPortfolio(db, today) {
   const latestPrices = await db.latestPrices(held.map((position) => position.symbol));
   const effective = plans.map((plan) => effectivePlan(plan, byPlan.get(plan.id) ?? []));
   const pendingCounts = new Map(plans.filter((plan) => plan.status === "active")
-    .map((plan) => [plan.id, missingSupplementFields(plan).length]));
+    .map((plan) => [plan.id, missingSupplementFieldsFor(plan).length]));
   const portfolio = snapshot({ settings, plans: effective, trades, cashFlows, latestPrices, fxRows, today });
   return { settings, plans: effective, portfolio, latestPrices, pendingCounts };
 }
@@ -82,9 +82,10 @@ function planList(title, plans, route, reviewStatuses, pendingCounts) {
         reviewStatuses ? h("div", { class: "record-meta" },
           h("strong", null, plan.name), h("span", { class: "lbl" }, plan.symbol),
         ) : [
-          pending > 0 ? h("div", { class: "holding-name" },
-            h("strong", null, plan.name), pendingLabel(pending)) : h("strong", null, plan.name),
-          h("span", { class: "lbl" }, plan.symbol),
+          h("div", { class: "holding-name" }, h("strong", null, plan.name), pendingLabel(pending),
+            plan.status === "draft" && plan.origin === "backfill" && h("span", { class: "chip" }, "期初")),
+          h("span", { class: "lbl" }, plan.symbol,
+            plan.status === "draft" && plan.opening_quantity != null && ` · ${plan.opening_quantity} 股`),
         ],
         reviewStatuses && h("span", { class: "lbl" }, `復盤：${reviewLabel}`),
       );
@@ -94,8 +95,10 @@ function planList(title, plans, route, reviewStatuses, pendingCounts) {
 
 export async function render(root, { db }) {
   const today = todayStr();
-  const [{ settings, plans, portfolio, pendingCounts }, evidence] = await Promise.all([
-    loadPortfolio(db, today), db.listEvidenceDirections(),
+  root.append(h("div", { class: "holdings-actions" }, newPlanLink(),
+    h("a", { class: "btn", href: "#holdings-import" }, "從持倉截圖建卡")));
+  const [{ settings, plans, portfolio, pendingCounts }, evidence, drafts] = await Promise.all([
+    loadPortfolio(db, today), db.listEvidenceDirections(), db.listDrafts(),
   ]);
   const held = portfolio.positions.filter(({ plan }) => plan.status === "active");
   const heldIds = new Set(held.map(({ plan }) => plan.id));
@@ -103,6 +106,11 @@ export async function render(root, { db }) {
   const reviews = closed.length ? await db.listExitReviews() : [];
   const reviewStatuses = new Map(reviews.map(({ plan_id, status }) => [plan_id, status]));
   if (!root.isConnected) return;
+  if (drafts.length) {
+    root.append(h("a", { class: "card action-card", href: `#plan-new/${drafts[0].id}` },
+      h("strong", null, `${drafts.length} 張草稿待確認`),
+      h("p", { class: "lbl" }, "補建卡只需確認買入理由與止損價")));
+  }
   if (!settings.start_date) {
     root.append(h("section", { class: "card risk-notice" },
       h("p", null, "請先到設定填寫起始日與起始現金"),
@@ -120,7 +128,6 @@ export async function render(root, { db }) {
   if (!plans.length) {
     root.append(h("section", { class: "card" },
       h("p", { class: "empty compact" }, "還沒有計劃卡。買入之前，先寫下理由。"),
-      newPlanLink(),
     ));
     return;
   }
@@ -131,7 +138,7 @@ export async function render(root, { db }) {
   ));
   for (const [title, group, route, statuses] of [
     ["已鎖定、未買入", plans.filter((plan) => plan.status === "active" && !heldIds.has(plan.id)), "plan"],
-    ["草稿", plans.filter((plan) => plan.status === "draft"), "plan-new"],
+    ["草稿", drafts, "plan-new"],
     ["已清倉", closed, "plan", reviewStatuses],
   ]) {
     const section = planList(title, group, route, statuses, pendingCounts);

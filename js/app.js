@@ -3,6 +3,7 @@ import { createDb } from "./db.js";
 import { field, h, missingTodayItem, toast } from "./ui.js";
 import * as settings from "./screens/settings.js";
 import * as holdings from "./screens/holdings.js";
+import * as holdingsImport from "./screens/holdings-import.js";
 import * as plan from "./screens/plan.js";
 import * as planNew from "./screens/plan-new.js";
 import * as trade from "./screens/trade.js";
@@ -27,6 +28,7 @@ const routes = new Map();
 routes.set("settings", { screen: settings });
 routes.set("today", { title: "今日待處理", screen: today, subtitle: true });
 routes.set("holdings", { title: "持倉", screen: holdings });
+routes.set("holdings-import", { title: "從持倉截圖建卡", screen: holdingsImport });
 routes.set("review", { title: "復盤", screen: review });
 routes.set("stats", { title: "季度統計", screen: stats, subtitle: true });
 routes.set("rules", { title: "規則清單", screen: rules, subtitle: true });
@@ -139,7 +141,7 @@ async function renderRoute() {
   const content = h("div", { class: "stack" });
   const itemBack = itemBackKey ? history.state[itemBackKey] : null;
   let backTo = prefix === "settings" ? history.state.settingsBack : lastTab ?? "#today";
-  if (invalid || prefix === "plan-new" && validId) backTo = "#holdings";
+  if (invalid || prefix === "holdings-import" || prefix === "plan-new" && validId) backTo = "#holdings";
   if ((prefix === "trade" || prefix === "import") && !invalid) backTo = `#plan/${id}`;
   if (todayItem) backTo = invalid ? "#today" : itemBack.sourcePlan ?? itemBack.tab;
   if (isExitReview) backTo = itemBack.sourcePlan ?? itemBack.tab;
@@ -150,7 +152,6 @@ async function renderRoute() {
     subtitle ? h("div", { class: isTab ? "page-title" : "page-title assessment-title" },
       pageSubtitle, pageTitle) : pageTitle,
     isTab && h("div", { class: "header-actions" },
-      prefix === "holdings" && h("a", { class: "btn", href: "#plan-new" }, "＋ 新計劃卡"),
       settingsLink(),
     ),
   );

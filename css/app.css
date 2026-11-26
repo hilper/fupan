@@ -515,52 +515,6 @@ dialog::backdrop {
   font-size: 13px;
 }
 
-.counter-panel, .counter-adopted, .counter-result:not([hidden]) {
-  display: grid;
-  gap: 8px;
-}
-
-.counter-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 8px;
-  align-items: center;
-}
-
-.counter-refresh {
-  padding-inline: 8px;
-  font-size: 12px;
-}
-
-.counter-adopted-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px 8px;
-}
-
-.counter-adopted-row .btn {
-  padding-inline: 6px;
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.counter-adopted-row .counter-original {
-  padding-inline: 0;
-  text-decoration: underline;
-}
-
-.counter-adopted-row .counter-original + .btn {
-  margin-inline-start: auto;
-}
-
-.counter-result {
-  justify-items: start;
-  padding: 12px;
-  border-radius: 8px;
-  background: #f0efec;
-}
-
 .ai-counter-card, .ai-counter-update {
   overflow-wrap: anywhere;
 }
@@ -692,6 +646,41 @@ dialog::backdrop {
   font-size: 13px;
 }
 
+.holdings-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.holdings-actions .btn {
+  padding-inline: 8px;
+}
+
+.holdings-import input,
+.holdings-import select {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.holdings-import-row-head {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+
+.holdings-import-row-head input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.holdings-import-row :is(.chip, .btn),
+.opening-summary .chip {
+  align-self: flex-start;
+}
+
 .field input[type="range"] {
   padding-inline: 0;
   accent-color: var(--accent);
@@ -706,7 +695,7 @@ dialog::backdrop {
   white-space: pre-wrap;
 }
 
-.plan-read-section .details-value p, .plan-read-text, .counter-panel .form-error {
+.plan-read-section .details-value p, .plan-read-text {
   overflow-wrap: anywhere;
 }
 
@@ -1176,4 +1165,58 @@ dialog::backdrop {
   min-height: 44px;
   color: var(--accent);
   cursor: pointer;
+}
+
+.chip.plan-source.ai {
+  color: #174997;
+  background: #edf5ff;
+  border-color: #a7c5ed;
+}
+
+.chip.plan-source.ai_edited {
+  color: #8b3d08;
+  background: #fff3e6;
+  border-color: #ebc3a2;
+}
+
+.chip.plan-source.user {
+  color: var(--ink);
+  border-color: var(--ink);
+}
+
+.draft-ai-status:not([hidden]) {
+  display: grid;
+  justify-items: start;
+  gap: 4px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.plan-field-heading .text-btn {
+  min-height: 24px;
+  padding: 0;
+  font-size: 12px;
+}
+
+.plan-draft-original summary {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.plan-edit-heading {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: center;
+  max-width: 100%;
+  vertical-align: middle;
+  overflow-wrap: anywhere;
+}
+
+.plan-edit-heading time {
+  white-space: nowrap;
+}
+
+.plan-edit-change .details-value {
+  margin-top: 6px;
 }
